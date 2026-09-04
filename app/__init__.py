@@ -1,2 +1,1 @@
-"""PortraitPilot application package."""
-
+"""ShotCraft application package."""

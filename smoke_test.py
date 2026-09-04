@@ -1,4 +1,4 @@
-"""Minimal PortraitPilot Strands setup check."""
+"""Minimal ShotCraft Strands setup check."""
 
 from strands import Agent
 
