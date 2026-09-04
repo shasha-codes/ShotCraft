@@ -1,0 +1,6 @@
+strands-agents==1.54.0
+fastapi
+uvicorn[standard]
+python-dotenv
+pillow
+
