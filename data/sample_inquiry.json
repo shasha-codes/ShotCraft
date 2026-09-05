@@ -1,0 +1,12 @@
+{
+  "client_name": "Maya Chen",
+  "client_email": "maya@example.com",
+  "message": "Hi! I would love to do a soft editorial portrait shoot next Saturday. I like the attached references and want around 8-10 final images for my modeling portfolio and Instagram. My budget is around $500.",
+  "budget": 500,
+  "shoot_date": "next Saturday",
+  "reference_images": [
+    "soft-editorial-reference-1.jpg",
+    "soft-editorial-reference-2.jpg",
+    "soft-editorial-reference-3.jpg"
+  ]
+}

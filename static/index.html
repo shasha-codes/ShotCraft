@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>ShotCraft — from inquiry to shoot</title>
+  <style>
+    :root{--ink:#1d1b20;--muted:#716b73;--cream:#f6f1eb;--accent:#b75d42;--line:#e5ddd5}
+    *{box-sizing:border-box}body{margin:0;background:var(--cream);color:var(--ink);font:16px system-ui,-apple-system,sans-serif}
+    main{max-width:1100px;margin:auto;padding:48px 24px}.eyebrow{color:var(--accent);font-weight:700;letter-spacing:.12em;text-transform:uppercase;font-size:12px}
+    h1{font:clamp(42px,7vw,76px) Georgia,serif;line-height:.98;max-width:700px;margin:14px 0}.lead{color:var(--muted);max-width:570px;font-size:18px;line-height:1.5}
+    .panel{background:#fff;border:1px solid var(--line);border-radius:20px;padding:26px;margin-top:34px;box-shadow:0 12px 35px #5c39200d}.grid{display:grid;grid-template-columns:1fr 1fr;gap:18px}label{display:grid;gap:7px;color:var(--muted);font-size:13px;font-weight:600}input,textarea{border:1px solid var(--line);border-radius:10px;padding:12px;font:inherit;color:var(--ink)}textarea{min-height:120px;resize:vertical}.full{grid-column:1/-1}
+    button{border:0;border-radius:999px;background:var(--ink);color:#fff;padding:13px 20px;font-weight:700;cursor:pointer;margin-top:20px}button:disabled{opacity:.55}.status{margin:18px 0;color:var(--muted)}.results{display:none}.tiles{display:grid;grid-template-columns:repeat(2,1fr);gap:16px}.tile{border-radius:14px;overflow:hidden;background:#eee}.tile img{display:block;width:100%;aspect-ratio:1;object-fit:cover}.tile figcaption{padding:12px;background:#fff;font-weight:650}.brief{white-space:pre-wrap;color:var(--muted);line-height:1.5}
+    @media(max-width:700px){.grid,.tiles{grid-template-columns:1fr}.full{grid-column:auto}}
+  </style>
+</head>
+<body><main>
+  <div class="eyebrow">ShotCraft · AI photoshoot producer</div>
+  <h1>Turn a vague inquiry into a shoot worth showing up for.</h1>
+  <p class="lead">ShotCraft turns a model’s message, references, and budget into a visual direction your crew can actually use.</p>
+  <section class="panel">
+    <div class="grid"><label>Client name<input id="name" value="Maya Chen"></label><label>Email<input id="email" value="maya@example.com" type="email"></label><label>Budget<input id="budget" value="500" type="number"></label><label>Shoot date<input id="date" type="date"><small style="color:var(--muted);font-weight:400">Leave blank if the date is still flexible.</small></label><label class="full">Inquiry<textarea id="message">I want a soft editorial portrait shoot in Brooklyn next Saturday. I need 8-10 final images for my modeling portfolio and Instagram. I have a cream blazer and black dress.</textarea></label></div>
+    <button id="go">Analyze inquiry →</button><div class="status" id="status">Gemma will identify what the photographer still needs to know.</div>
+    <div id="questions" style="display:none;margin-top:18px"><div id="questionList" style="color:var(--muted);line-height:1.6;margin-bottom:12px"></div><label>Client answers<textarea id="answers" placeholder="Answer the questions above, or add any extra details…"></textarea></label><button id="continue">Create brief and moodboard →</button></div>
+  </section>
+  <section class="panel results" id="results"><div class="eyebrow">Your visual direction</div><h2 id="title"></h2><p class="brief" id="summary"></p><div class="tiles" id="tiles"></div></section>
+  <section class="panel" id="briefReview" style="display:none"><div class="eyebrow">Review before rendering</div><h2 id="briefTitle"></h2><p class="brief" id="briefText"></p><button id="approve">Approve and generate moodboard →</button></section>
+</main><script>
+const $=id=>document.getElementById(id); let inquiry, analysis;
+async function analyze(){ $('go').disabled=true;$('status').textContent='Analyzing the inquiry…'; inquiry={client_name:$('name').value,client_email:$('email').value,message:$('message').value,budget:Number($('budget').value)||null,shoot_date:$('date').value||null,reference_images:[]}; try{const r=await fetch('/api/inquiries/analyze',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(inquiry)});if(!r.ok)throw Error(await r.text());analysis=await r.json();const qs=analysis.questions?.length?analysis.questions:analysis.missing_information; $('status').textContent=analysis.summary; $('questions').style.display='block'; $('questionList').innerHTML=qs.length?'<strong>ShotCraft needs to clarify:</strong><ol>'+qs.map(q=>`<li>${q}</li>`).join('')+'</ol>':'<strong>No clarification needed.</strong>'; $('answers').placeholder=qs.length?'Answer the questions above, or add any extra details…':'Add any final details for the photographer…'; $('go').style.display='none'}catch(e){$('status').textContent='Could not analyze: '+e.message;$('go').disabled=false}}
+let creativeBrief;
+async function build(){ $('continue').disabled=true;$('status').textContent='Creating your creative brief…'; const client_answers={details:$('answers').value}; try{const b=await fetch('/api/inquiries/brief',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({inquiry,client_answers})});if(!b.ok)throw Error(await b.text());creativeBrief=await b.json();$('briefTitle').textContent=creativeBrief.concept_name;$('briefText').textContent=`${creativeBrief.creative_summary}\n\nLocation: ${creativeBrief.location_direction}\nLighting: ${creativeBrief.lighting_direction}\nPosing: ${creativeBrief.posing_direction}\nWardrobe: ${creativeBrief.wardrobe_direction}\nDeliverables: ${creativeBrief.deliverables.join(', ')}\nBudget: ${creativeBrief.budget_notes}`;$('briefReview').style.display='block';$('questions').style.display='none';$('status').textContent='Review the brief, then approve it to render images.'}catch(e){$('status').textContent='Could not create brief: '+e.message;$('continue').disabled=false}}
+async function approve(){ $('approve').disabled=true;$('status').textContent='Rendering four visual references…'; try{const r=await fetch('/api/moodboards/create-and-generate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({brief:creativeBrief})});if(!r.ok)throw Error(await r.text());const d=await r.json();$('title').textContent=d.moodboard.title;$('summary').textContent=d.moodboard.creative_direction;$('tiles').innerHTML=d.generated.tiles.map(t=>`<figure class="tile"><img src="${t.image_url}" alt="${t.title}"><figcaption>${t.title}</figcaption></figure>`).join('');$('results').style.display='block';$('status').textContent='Moodboard ready.'}catch(e){$('status').textContent='Could not generate: '+e.message;$('approve').disabled=false}}
+$('go').onclick=analyze; $('continue').onclick=build; $('approve').onclick=approve;
+</script></body></html>
