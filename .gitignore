@@ -5,3 +5,5 @@ __pycache__/
 .DS_Store
 *.log
 
+# Local runtime data (contains test users, inquiries, and hashed passwords)
+data/shotcraft.db

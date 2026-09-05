@@ -3,4 +3,5 @@ fastapi
 uvicorn[standard]
 python-dotenv
 pillow
-
+boto3
+openai
