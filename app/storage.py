@@ -13,6 +13,11 @@ def _ensure_schema(db: sqlite3.Connection) -> None:
     columns = {row[1] for row in db.execute("PRAGMA table_info(inquiries)")}
     if "analysis" not in columns: db.execute("ALTER TABLE inquiries ADD COLUMN analysis TEXT")
     if "updated_at" not in columns: db.execute("ALTER TABLE inquiries ADD COLUMN updated_at TEXT")
+    if "moodboard" not in columns: db.execute("ALTER TABLE inquiries ADD COLUMN moodboard TEXT")
+    if "production_pack" not in columns: db.execute("ALTER TABLE inquiries ADD COLUMN production_pack TEXT")
+    if "production_approved" not in columns: db.execute("ALTER TABLE inquiries ADD COLUMN production_approved INTEGER DEFAULT 0")
+    if "call_time" not in columns: db.execute("ALTER TABLE inquiries ADD COLUMN call_time TEXT")
+    if "meeting_location" not in columns: db.execute("ALTER TABLE inquiries ADD COLUMN meeting_location TEXT")
     db.execute("CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, name TEXT NOT NULL, email TEXT UNIQUE NOT NULL, password_hash TEXT NOT NULL, user_type TEXT NOT NULL, created_at TEXT DEFAULT CURRENT_TIMESTAMP)")
 
 def _hash_password(password: str, salt: str | None = None) -> str:
@@ -56,6 +61,46 @@ def list_inquiries() -> list[dict]:
         _ensure_schema(db)
         rows = db.execute("SELECT * FROM inquiries ORDER BY id DESC").fetchall()
         return [dict(row) for row in rows]
+
+def save_moodboard(inquiry_id: int, result: dict) -> None:
+    with sqlite3.connect(DB_PATH) as db:
+        _ensure_schema(db)
+        db.execute("UPDATE inquiries SET moodboard=?, updated_at=CURRENT_TIMESTAMP WHERE id=?", (json.dumps(result), inquiry_id))
+        db.commit()
+
+def save_production_pack(inquiry_id: int, pack: dict) -> None:
+    with sqlite3.connect(DB_PATH) as db:
+        _ensure_schema(db)
+        db.execute("UPDATE inquiries SET production_pack=?, updated_at=CURRENT_TIMESTAMP WHERE id=?", (json.dumps(pack), inquiry_id))
+        db.commit()
+
+def approve_production_pack(inquiry_id: int) -> bool:
+    with sqlite3.connect(DB_PATH) as db:
+        _ensure_schema(db)
+        cur = db.execute("UPDATE inquiries SET production_approved=1, updated_at=CURRENT_TIMESTAMP WHERE id=? AND production_pack IS NOT NULL", (inquiry_id,))
+        db.commit()
+        return cur.rowcount > 0
+
+def set_client_decision(inquiry_id: int, status: str, note: str | None = None) -> bool:
+    with sqlite3.connect(DB_PATH) as db:
+        _ensure_schema(db)
+        cur = db.execute("UPDATE inquiries SET status=?, updated_at=CURRENT_TIMESTAMP WHERE id=? AND production_approved=1", (status, inquiry_id))
+        db.commit()
+        return cur.rowcount > 0
+
+def schedule_inquiry(inquiry_id: int, call_time: str, meeting_location: str) -> bool:
+    with sqlite3.connect(DB_PATH) as db:
+        _ensure_schema(db)
+        # Permit a photographer to correct an existing schedule, but only after
+        # the client has confirmed the production plan.
+        cur = db.execute(
+            """UPDATE inquiries
+               SET status='SCHEDULED', call_time=?, meeting_location=?, updated_at=CURRENT_TIMESTAMP
+               WHERE id=? AND status IN ('CLIENT_CONFIRMED', 'SCHEDULED')""",
+            (call_time, meeting_location, inquiry_id),
+        )
+        db.commit()
+        return cur.rowcount > 0
 
 def get_inquiry(inquiry_id: int) -> dict | None:
     rows = [r for r in list_inquiries() if r["id"] == inquiry_id]

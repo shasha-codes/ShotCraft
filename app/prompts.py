@@ -52,6 +52,7 @@ Return ONLY valid JSON with this exact shape:
   "lighting_direction": "practical lighting approach",
   "posing_direction": "posing and expression direction",
   "wardrobe_direction": "specific wardrobe guidance",
+  "subject_profile": "strict factual generation lock: person count, presentation, supplied appearance details, and exact wardrobe",
   "deliverables": ["specific deliverables"],
   "budget_notes": "brief budget tradeoff or constraint",
   "remaining_questions": ["questions still requiring a decision"]
@@ -75,6 +76,8 @@ be a close portrait; and the wardrobe/pose tile should be a full or three-quarte
 fashion pose. Repeat the same subject descriptor in every portrait prompt,
 including gender presentation, approximate age, hair, skin tone, and wardrobe.
 Never switch the subject's gender or appearance between tiles.
+Treat the brief's subject_profile as a hard constraint. Never replace it with a
+default woman, man, model, or group.
 
 Return ONLY valid JSON with this exact shape:
 {
