@@ -6,13 +6,26 @@ from pydantic import BaseModel, Field
 class Inquiry(BaseModel):
     client_name: str = Field(min_length=1)
     client_email: str = Field(min_length=3)
+    contact_email: str | None = None
     message: str = Field(min_length=1)
     budget: float | None = Field(default=None, ge=0)
     shoot_date: str | None = None
     reference_images: list[str] = Field(default_factory=list)
+    photographer_email: str | None = None
+    subject_presentation: str | None = None
+    subject_count: int | None = Field(default=None, ge=1, le=10)
+    wardrobe_details: str | None = None
+    deliverable_count: int | None = Field(default=None, ge=1, le=100)
 
 class InquiryReply(BaseModel):
     answers: str = Field(min_length=1)
+
+class ClientDecision(BaseModel):
+    note: str | None = None
+
+class ScheduleRequest(BaseModel):
+    call_time: str = Field(min_length=1)
+    meeting_location: str = Field(min_length=1)
 
 
 class InquiryAnalysis(BaseModel):
@@ -25,6 +38,7 @@ class InquiryAnalysis(BaseModel):
 class BriefRequest(BaseModel):
     inquiry: Inquiry
     client_answers: dict[str, str] = Field(default_factory=dict)
+    inquiry_id: int | None = None
 
 
 class CreativeBrief(BaseModel):
@@ -35,6 +49,7 @@ class CreativeBrief(BaseModel):
     lighting_direction: str
     posing_direction: str
     wardrobe_direction: str
+    subject_profile: str = ""
     deliverables: list[str] = Field(default_factory=list)
     budget_notes: str
     remaining_questions: list[str] = Field(default_factory=list)
@@ -42,6 +57,7 @@ class CreativeBrief(BaseModel):
 
 class MoodboardRequest(BaseModel):
     brief: CreativeBrief
+    inquiry_id: int | None = None
 
 
 class MoodboardTile(BaseModel):

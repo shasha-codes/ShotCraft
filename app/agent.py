@@ -27,7 +27,7 @@ def create_creative_brief(request: BriefRequest) -> CreativeBrief:
 def create_moodboard(request: MoodboardRequest) -> Moodboard:
     agent = Agent(model=BedrockModel(model_id=PLANNING_MODEL_ID), system_prompt=MOODBOARD_PROMPT, callback_handler=None)
     moodboard = Moodboard.model_validate_json(_json(agent(f"Create a moodboard plan from:\n{request.brief.model_dump_json(indent=2)}")))
-    lock = f"Client brief lock: {request.brief.creative_summary} Location and setting: {request.brief.location_direction} Wardrobe: {request.brief.wardrobe_direction} Preserve the requested subject presentation exactly."
+    lock = f"HARD SUBJECT LOCK: {request.brief.subject_profile}. Client brief: {request.brief.creative_summary} Location and setting: {request.brief.location_direction} Wardrobe: {request.brief.wardrobe_direction}. Preserve the subject lock exactly; never change presentation, number of people, or wardrobe."
     for tile in moodboard.tiles:
         tile.visual_prompt = f"{lock} Tile direction: {tile.visual_prompt}"
     return moodboard

@@ -1,1 +1,39 @@
-<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Sign in · ShotCraft</title><style>body{margin:0;background:#f7f2ec;color:#211d21;font:15px/1.5 system-ui}.wrap{max-width:460px;margin:0 auto;padding:55px 20px}.brand{font:700 24px Georgia,serif;margin-bottom:65px}.card{background:#fffdfa;border:1px solid #e4dcd4;border-radius:22px;padding:30px;box-shadow:0 18px 50px #3c28190f}.eyebrow{color:#c65c3d;font-size:11px;font-weight:800;letter-spacing:.16em;text-transform:uppercase}h1{font:500 40px Georgia;margin:8px 0 10px}p{color:#776f73}.tabs{display:flex;gap:6px;margin:24px 0}.tabs button{flex:1;border:1px solid #e4dcd4;background:#fff;padding:10px;border-radius:10px;font-weight:700;cursor:pointer}.tabs button.active{background:#211d21;color:#fff}.field{display:flex;flex-direction:column;gap:6px;margin:14px 0}label{font-size:12px;font-weight:700}input{border:1px solid #e4dcd4;border-radius:10px;padding:12px;font:inherit}.roles{display:grid;grid-template-columns:1fr 1fr;gap:8px}.roles label{border:1px solid #e4dcd4;border-radius:10px;padding:11px;cursor:pointer}.roles input{margin-right:7px}.submit{width:100%;margin-top:18px;border:0;border-radius:999px;background:#211d21;color:#fff;padding:13px;font-weight:750;cursor:pointer}#status{min-height:24px;color:#c65c3d;text-align:center;font-size:13px}</style></head><body><main class="wrap"><div class="brand">ShotCraft</div><section class="card"><div class="eyebrow">Your creative workspace</div><h1 id="heading">Welcome back.</h1><p id="sub">Sign in to continue your shoot journey.</p><div class="tabs"><button id="loginTab" class="active">Sign in</button><button id="signupTab">Create account</button></div><form id="form"><div class="field" id="nameField" style="display:none"><label for="name">Your name</label><input id="name" autocomplete="name"></div><div class="field"><label for="email">Email address</label><input id="email" type="email" required autocomplete="email"></div><div class="field"><label for="password">Password</label><input id="password" type="password" required minlength="8" autocomplete="current-password"></div><div class="field" id="roleField"><label>I’m signing in as</label><div class="roles"><label><input type="radio" name="role" value="client" checked>Client</label><label><input type="radio" name="role" value="photographer">Photographer</label></div></div><button class="submit" id="submit">Sign in →</button><div id="status" role="status"></div></form></section></main><script>let mode='login';const $=id=>document.getElementById(id);function setMode(next){mode=next;const signup=mode==='signup';$('loginTab').classList.toggle('active',!signup);$('signupTab').classList.toggle('active',signup);$('heading').textContent=signup?'Create your ShotCraft account.':'Welcome back.';$('sub').textContent=signup?'Choose your workspace to get started.':'Sign in to continue your shoot journey.';$('nameField').style.display=signup?'flex':'none';$('roleField').style.display=signup?'block':'none';$('name').required=signup;$('submit').textContent=signup?'Create account →':'Sign in →'}$('loginTab').onclick=()=>setMode('login');$('signupTab').onclick=()=>setMode('signup');setMode('login');$('form').onsubmit=async e=>{e.preventDefault();$('submit').disabled=true;$('status').textContent='One moment…';const selectedRole=document.querySelector('input[name=role]:checked').value;const body={name:$('name').value||null,email:$('email').value,password:$('password').value,...(mode==='signup'?{user_type:selectedRole}:{})};try{const r=await fetch('/api/auth/'+mode,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}),d=await r.json();if(d.error)throw Error(d.error);sessionStorage.setItem('shotcraftUser',JSON.stringify(d));location.href=d.user_type==='photographer'?'/photographer':'/client'}catch(err){$('status').textContent=err.message;$('submit').disabled=false}};</script></body></html>
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Welcome · ShotCraft</title>
+  <link rel="stylesheet" href="/static/auth.css">
+</head>
+<body>
+  <main class="auth-shell">
+    <section class="visual" aria-label="ShotCraft creative workspace">
+      <img src="/static/landing/pexels-inna-mykytas-16763015.jpg" alt="Editorial portrait of a model wearing a jeweled veil">
+      <div class="visual-shade"></div><div class="orbit orbit-one"></div><div class="orbit orbit-two"></div>
+      <a class="brand light" href="/"><span class="brand-mark">S</span><span>ShotCraft</span></a>
+      <div class="visual-copy"><p class="eyebrow">The intelligent photoshoot workspace</p><h1>Every great shoot<br>starts with <em>clarity.</em></h1><p>Bring the client and photographer into one beautifully planned workspace.</p></div>
+      <div class="visual-foot"><span>Creative direction</span><i></i><span>Production planning</span><i></i><span>Shoot day</span></div>
+    </section>
+
+    <section class="form-panel">
+      <div class="form-wrap">
+        <a class="back" href="/">← Back to ShotCraft</a>
+        <div class="mobile-brand"><span class="brand-mark">S</span><span>ShotCraft</span></div>
+        <div class="tabs" role="tablist" aria-label="Authentication mode"><button id="loginTab" role="tab">Sign in</button><button id="signupTab" role="tab">Create account</button></div>
+        <div class="intro"><p class="eyebrow">Your creative workspace</p><h2 id="heading">Welcome back.</h2><p id="sub">Sign in to continue planning remarkable shoots.</p></div>
+        <form id="form">
+          <div class="field" id="nameField"><label for="name">Your name</label><input id="name" autocomplete="name" placeholder="How should we address you?"></div>
+          <div class="field"><label for="email">Email address</label><input id="email" type="email" required autocomplete="email" placeholder="you@example.com"></div>
+          <div class="field"><div class="label-row"><label for="password">Password</label><span id="passwordHint">At least 8 characters</span></div><input id="password" type="password" required minlength="8" autocomplete="current-password" placeholder="Enter your password"></div>
+          <fieldset id="roleField"><legend>Choose your workspace</legend><div class="roles"><label class="role"><input type="radio" name="role" value="client" checked><span class="role-icon">◎</span><span><b>Plan a shoot</b><small>I’m a client sharing my vision</small></span><i>✓</i></label><label class="role"><input type="radio" name="role" value="photographer"><span class="role-icon">◇</span><span><b>Manage my studio</b><small>I’m a photographer producing shoots</small></span><i>✓</i></label></div></fieldset>
+          <button class="submit" id="submit">Sign in <span>→</span></button>
+          <div id="status" role="status" aria-live="polite"></div>
+        </form>
+        <p class="terms">By continuing, you agree to use ShotCraft as a collaborative planning workspace.</p>
+      </div>
+    </section>
+  </main>
+  <script src="/static/auth.js"></script>
+</body>
+</html>
