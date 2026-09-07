@@ -19,6 +19,62 @@ def _ensure_schema(db: sqlite3.Connection) -> None:
     if "call_time" not in columns: db.execute("ALTER TABLE inquiries ADD COLUMN call_time TEXT")
     if "meeting_location" not in columns: db.execute("ALTER TABLE inquiries ADD COLUMN meeting_location TEXT")
     db.execute("CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, name TEXT NOT NULL, email TEXT UNIQUE NOT NULL, password_hash TEXT NOT NULL, user_type TEXT NOT NULL, created_at TEXT DEFAULT CURRENT_TIMESTAMP)")
+    db.execute("""CREATE TABLE IF NOT EXISTS inquiry_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        inquiry_id INTEGER NOT NULL,
+        event_type TEXT NOT NULL,
+        metadata TEXT,
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(inquiry_id, event_type),
+        FOREIGN KEY(inquiry_id) REFERENCES inquiries(id) ON DELETE CASCADE
+    )""")
+
+def _record_event(db: sqlite3.Connection, inquiry_id: int, event_type: str, metadata: dict | None = None) -> None:
+    encoded = json.dumps(metadata or {})
+    if event_type == "FOLLOWUP_SUBMITTED":
+        db.execute("INSERT INTO inquiry_events (inquiry_id, event_type, metadata) VALUES (?, ?, ?) ON CONFLICT(inquiry_id, event_type) DO UPDATE SET metadata=excluded.metadata, created_at=CURRENT_TIMESTAMP", (inquiry_id, event_type, encoded))
+    else:
+        db.execute("INSERT OR IGNORE INTO inquiry_events (inquiry_id, event_type, metadata) VALUES (?, ?, ?)", (inquiry_id, event_type, encoded))
+
+def record_event(inquiry_id: int, event_type: str, metadata: dict | None = None) -> None:
+    with sqlite3.connect(DB_PATH) as db:
+        _ensure_schema(db)
+        _record_event(db, inquiry_id, event_type, metadata)
+        db.commit()
+
+def _backfill_events(db: sqlite3.Connection, inquiry_id: int, row: sqlite3.Row | tuple) -> None:
+    """Populate milestones for legacy rows without inventing timestamps."""
+    values = dict(row) if isinstance(row, sqlite3.Row) else {}
+    _record_event(db, inquiry_id, "INQUIRY_RECEIVED")
+    analysis = json.loads(values.get("analysis") or "{}")
+    payload = json.loads(values.get("payload") or "{}")
+    if values.get("moodboard"):
+        _record_event(db, inquiry_id, "MOODBOARD_READY")
+    if values.get("production_approved"):
+        _record_event(db, inquiry_id, "PRODUCTION_PLAN_SHARED")
+    if values.get("status") in {"CLIENT_CONFIRMED", "SCHEDULED"}:
+        _record_event(db, inquiry_id, "SHOOT_CONFIRMED")
+    if values.get("status") == "SCHEDULED":
+        _record_event(db, inquiry_id, "SHOOT_SCHEDULED")
+
+def inquiry_timeline(inquiry_id: int) -> list[dict]:
+    milestones = [
+        ("INQUIRY_RECEIVED", "Inquiry received"), ("FOLLOWUP_SUBMITTED", "Follow-up submitted"),
+        ("QUESTIONS_ANSWERED", "Questions answered"),
+        ("BRIEF_APPROVED", "Creative brief approved"), ("MOODBOARD_READY", "Moodboard ready"),
+        ("PRODUCTION_PLAN_SHARED", "Production plan shared"), ("SHOOT_CONFIRMED", "Shoot confirmed"),
+        ("SHOOT_SCHEDULED", "Scheduled"),
+    ]
+    with sqlite3.connect(DB_PATH) as db:
+        db.row_factory = sqlite3.Row
+        _ensure_schema(db)
+        row = db.execute("SELECT * FROM inquiries WHERE id=?", (inquiry_id,)).fetchone()
+        if not row: return []
+        _backfill_events(db, inquiry_id, row)
+        rows = db.execute("SELECT event_type, created_at, metadata FROM inquiry_events WHERE inquiry_id=?", (inquiry_id,)).fetchall()
+        db.commit()
+    events = {row["event_type"]: row for row in rows}
+    return [{"type": event_type, "label": label, "completed": event_type in events, "timestamp": events[event_type]["created_at"] if event_type in events else None, "metadata": json.loads(events[event_type]["metadata"] or "{}") if event_type in events else {}} for event_type, label in milestones]
 
 def _hash_password(password: str, salt: str | None = None) -> str:
     salt = salt or secrets.token_hex(16)
@@ -45,6 +101,7 @@ def save_inquiry(inquiry: Inquiry) -> int:
     with sqlite3.connect(DB_PATH) as db:
         _ensure_schema(db)
         cur = db.execute("INSERT INTO inquiries (client_email, payload) VALUES (?, ?)", (inquiry.client_email, json.dumps(inquiry.model_dump())))
+        _record_event(db, int(cur.lastrowid), "INQUIRY_RECEIVED")
         db.commit()
         return int(cur.lastrowid)
 
@@ -66,18 +123,24 @@ def save_moodboard(inquiry_id: int, result: dict) -> None:
     with sqlite3.connect(DB_PATH) as db:
         _ensure_schema(db)
         db.execute("UPDATE inquiries SET moodboard=?, updated_at=CURRENT_TIMESTAMP WHERE id=?", (json.dumps(result), inquiry_id))
+        _record_event(db, inquiry_id, "MOODBOARD_READY")
         db.commit()
 
-def save_production_pack(inquiry_id: int, pack: dict) -> None:
+def save_production_pack(inquiry_id: int, pack: dict, draft: bool = False) -> None:
     with sqlite3.connect(DB_PATH) as db:
         _ensure_schema(db)
-        db.execute("UPDATE inquiries SET production_pack=?, updated_at=CURRENT_TIMESTAMP WHERE id=?", (json.dumps(pack), inquiry_id))
+        if draft:
+            db.execute("UPDATE inquiries SET production_pack=?, production_approved=0, updated_at=CURRENT_TIMESTAMP WHERE id=?", (json.dumps(pack), inquiry_id))
+            db.execute("DELETE FROM inquiry_events WHERE inquiry_id=? AND event_type='PRODUCTION_PLAN_SHARED'", (inquiry_id,))
+        else:
+            db.execute("UPDATE inquiries SET production_pack=?, updated_at=CURRENT_TIMESTAMP WHERE id=?", (json.dumps(pack), inquiry_id))
         db.commit()
 
 def approve_production_pack(inquiry_id: int) -> bool:
     with sqlite3.connect(DB_PATH) as db:
         _ensure_schema(db)
         cur = db.execute("UPDATE inquiries SET production_approved=1, updated_at=CURRENT_TIMESTAMP WHERE id=? AND production_pack IS NOT NULL", (inquiry_id,))
+        if cur.rowcount: _record_event(db, inquiry_id, "PRODUCTION_PLAN_SHARED")
         db.commit()
         return cur.rowcount > 0
 
@@ -85,6 +148,7 @@ def set_client_decision(inquiry_id: int, status: str, note: str | None = None) -
     with sqlite3.connect(DB_PATH) as db:
         _ensure_schema(db)
         cur = db.execute("UPDATE inquiries SET status=?, updated_at=CURRENT_TIMESTAMP WHERE id=? AND production_approved=1", (status, inquiry_id))
+        if cur.rowcount and status == "CLIENT_CONFIRMED": _record_event(db, inquiry_id, "SHOOT_CONFIRMED", {"note": note} if note else None)
         db.commit()
         return cur.rowcount > 0
 
@@ -99,6 +163,7 @@ def schedule_inquiry(inquiry_id: int, call_time: str, meeting_location: str) -> 
                WHERE id=? AND status IN ('CLIENT_CONFIRMED', 'SCHEDULED')""",
             (call_time, meeting_location, inquiry_id),
         )
+        if cur.rowcount: _record_event(db, inquiry_id, "SHOOT_SCHEDULED", {"call_time": call_time, "meeting_location": meeting_location})
         db.commit()
         return cur.rowcount > 0
 
@@ -114,5 +179,6 @@ def append_reply(inquiry_id: int, answers: str) -> dict | None:
     with sqlite3.connect(DB_PATH) as db:
         _ensure_schema(db)
         db.execute("UPDATE inquiries SET payload=?, status='NEW', updated_at=CURRENT_TIMESTAMP WHERE id=?", (json.dumps(payload), inquiry_id))
+        _record_event(db, inquiry_id, "FOLLOWUP_SUBMITTED", {"answers": answers})
         db.commit()
     return Inquiry(**payload).model_dump()

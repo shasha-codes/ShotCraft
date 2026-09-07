@@ -3,8 +3,8 @@ import json
 import os
 from strands import Agent
 from strands.models import BedrockModel
-from .models import BriefRequest, CreativeBrief, Inquiry, InquiryAnalysis, Moodboard, MoodboardRequest
-from .prompts import BRIEF_PROMPT, MOODBOARD_PROMPT, SYSTEM_PROMPT
+from .models import BriefRequest, CreativeBrief, Inquiry, InquiryAnalysis, Moodboard, MoodboardRequest, ProductionPack
+from .prompts import BRIEF_PROMPT, MOODBOARD_PROMPT, PRODUCTION_PROMPT, SYSTEM_PROMPT
 
 PLANNING_MODEL_ID = os.getenv("SHOTCRAFT_PLANNING_MODEL", "openai.gpt-oss-20b-1:0")
 INTAKE_MODEL_ID = "google.gemma-3-4b-it"
@@ -31,3 +31,12 @@ def create_moodboard(request: MoodboardRequest) -> Moodboard:
     for tile in moodboard.tiles:
         tile.visual_prompt = f"{lock} Tile direction: {tile.visual_prompt}"
     return moodboard
+
+
+def build_production_pack(inquiry: Inquiry, moodboard: dict | None = None) -> ProductionPack:
+    """Create a production pack scoped exclusively to one inquiry."""
+    agent = Agent(model=BedrockModel(model_id=PLANNING_MODEL_ID), system_prompt=PRODUCTION_PROMPT, callback_handler=None)
+    payload = {"inquiry": inquiry.model_dump(), "creative_direction": moodboard or {}}
+    return ProductionPack.model_validate_json(
+        _json(agent(f"Create the production pack from:\n{json.dumps(payload, indent=2)}"))
+    )
