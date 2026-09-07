@@ -3,8 +3,8 @@ import json
 import os
 from strands import Agent
 from strands.models import BedrockModel
-from .models import BriefRequest, CreativeBrief, Inquiry, InquiryAnalysis, Moodboard, MoodboardRequest, ProductionPack
-from .prompts import BRIEF_PROMPT, MOODBOARD_PROMPT, PRODUCTION_PROMPT, SYSTEM_PROMPT
+from .models import BriefRequest, CreativeBrief, Inquiry, InquiryAnalysis, Moodboard, MoodboardRequest, ProductionPack, ScheduleSuggestion
+from .prompts import BRIEF_PROMPT, MOODBOARD_PROMPT, PRODUCTION_PROMPT, SCHEDULING_PROMPT, SYSTEM_PROMPT
 
 PLANNING_MODEL_ID = os.getenv("SHOTCRAFT_PLANNING_MODEL", "openai.gpt-oss-20b-1:0")
 INTAKE_MODEL_ID = "google.gemma-3-4b-it"
@@ -40,3 +40,8 @@ def build_production_pack(inquiry: Inquiry, moodboard: dict | None = None) -> Pr
     return ProductionPack.model_validate_json(
         _json(agent(f"Create the production pack from:\n{json.dumps(payload, indent=2)}"))
     )
+
+def recommend_schedule_slots(inquiry: Inquiry, busy_times: list[dict]) -> list[ScheduleSuggestion]:
+    agent = Agent(model=BedrockModel(model_id=PLANNING_MODEL_ID), system_prompt=SCHEDULING_PROMPT, callback_handler=None)
+    result = json.loads(_json(agent(f"Inquiry:\n{inquiry.model_dump_json(indent=2)}\nBusy times:\n{json.dumps(busy_times, indent=2)}")))
+    return [ScheduleSuggestion.model_validate(item) for item in result["suggestions"]]

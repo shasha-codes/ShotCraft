@@ -18,6 +18,18 @@ def _ensure_schema(db: sqlite3.Connection) -> None:
     if "production_approved" not in columns: db.execute("ALTER TABLE inquiries ADD COLUMN production_approved INTEGER DEFAULT 0")
     if "call_time" not in columns: db.execute("ALTER TABLE inquiries ADD COLUMN call_time TEXT")
     if "meeting_location" not in columns: db.execute("ALTER TABLE inquiries ADD COLUMN meeting_location TEXT")
+    db.execute("""CREATE TABLE IF NOT EXISTS schedule_requests (
+        inquiry_id INTEGER PRIMARY KEY,
+        photographer_email TEXT NOT NULL,
+        suggestions TEXT NOT NULL,
+        selected_starts_at TEXT,
+        selected_ends_at TEXT,
+        selected_location TEXT,
+        status TEXT NOT NULL DEFAULT 'PENDING_CLIENT',
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY(inquiry_id) REFERENCES inquiries(id) ON DELETE CASCADE
+    )""")
     db.execute("CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, name TEXT NOT NULL, email TEXT UNIQUE NOT NULL, password_hash TEXT NOT NULL, user_type TEXT NOT NULL, created_at TEXT DEFAULT CURRENT_TIMESTAMP)")
     db.execute("""CREATE TABLE IF NOT EXISTS inquiry_events (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -28,6 +40,20 @@ def _ensure_schema(db: sqlite3.Connection) -> None:
         UNIQUE(inquiry_id, event_type),
         FOREIGN KEY(inquiry_id) REFERENCES inquiries(id) ON DELETE CASCADE
     )""")
+    db.execute("""CREATE TABLE IF NOT EXISTS inquiry_messages (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        inquiry_id INTEGER NOT NULL,
+        sender_role TEXT NOT NULL CHECK(sender_role IN ('client', 'photographer')),
+        sender_name TEXT NOT NULL,
+        body TEXT NOT NULL,
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY(inquiry_id) REFERENCES inquiries(id) ON DELETE CASCADE
+    )""")
+    message_columns = {row[1] for row in db.execute("PRAGMA table_info(inquiry_messages)")}
+    if "read_by_client_at" not in message_columns:
+        db.execute("ALTER TABLE inquiry_messages ADD COLUMN read_by_client_at TEXT")
+    if "read_by_photographer_at" not in message_columns:
+        db.execute("ALTER TABLE inquiry_messages ADD COLUMN read_by_photographer_at TEXT")
 
 def _record_event(db: sqlite3.Connection, inquiry_id: int, event_type: str, metadata: dict | None = None) -> None:
     encoded = json.dumps(metadata or {})
@@ -167,9 +193,140 @@ def schedule_inquiry(inquiry_id: int, call_time: str, meeting_location: str) -> 
         db.commit()
         return cur.rowcount > 0
 
+def scheduled_times(photographer_email: str) -> list[dict]:
+    """Confirmed shoots plus client-selected requests that need photographer review."""
+    with sqlite3.connect(DB_PATH) as db:
+        db.row_factory = sqlite3.Row
+        _ensure_schema(db)
+        rows = db.execute("SELECT id, payload, call_time, meeting_location FROM inquiries WHERE status='SCHEDULED'").fetchall()
+        pending = db.execute("SELECT inquiry_id, selected_starts_at, selected_ends_at, selected_location FROM schedule_requests WHERE photographer_email=? AND status='PENDING_PHOTOGRAPHER'", (photographer_email.lower(),)).fetchall()
+    times = []
+    for row in rows:
+        payload = json.loads(row["payload"] or "{}")
+        if (payload.get("photographer_email") or "").lower() == photographer_email.lower() and row["call_time"]:
+            times.append({"inquiry_id": row["id"], "starts_at": row["call_time"], "ends_at": None, "location": row["meeting_location"], "kind": "scheduled"})
+    times.extend({"inquiry_id": row["inquiry_id"], "starts_at": row["selected_starts_at"], "ends_at": row["selected_ends_at"], "location": row["selected_location"], "kind": "pending_confirmation"} for row in pending)
+    return times
+
+def save_schedule_suggestions(inquiry_id: int, photographer_email: str, suggestions: list[dict]) -> dict:
+    with sqlite3.connect(DB_PATH) as db:
+        db.row_factory = sqlite3.Row
+        _ensure_schema(db)
+        db.execute("""INSERT INTO schedule_requests (inquiry_id, photographer_email, suggestions, status)
+            VALUES (?, ?, ?, 'PENDING_CLIENT')
+            ON CONFLICT(inquiry_id) DO UPDATE SET photographer_email=excluded.photographer_email,
+              suggestions=excluded.suggestions, selected_starts_at=NULL, selected_ends_at=NULL,
+              selected_location=NULL, status='PENDING_CLIENT', updated_at=CURRENT_TIMESTAMP""",
+            (inquiry_id, photographer_email.lower(), json.dumps(suggestions)))
+        db.commit()
+    return get_schedule_request(inquiry_id) or {}
+
+def get_schedule_request(inquiry_id: int) -> dict | None:
+    with sqlite3.connect(DB_PATH) as db:
+        db.row_factory = sqlite3.Row
+        _ensure_schema(db)
+        row = db.execute("SELECT * FROM schedule_requests WHERE inquiry_id=?", (inquiry_id,)).fetchone()
+    if not row: return None
+    result = dict(row)
+    result["suggestions"] = json.loads(result.pop("suggestions") or "[]")
+    return result
+
+def select_schedule_suggestion(inquiry_id: int, starts_at: str, ends_at: str, location: str) -> bool:
+    with sqlite3.connect(DB_PATH) as db:
+        _ensure_schema(db)
+        cur = db.execute("""UPDATE schedule_requests SET selected_starts_at=?, selected_ends_at=?,
+            selected_location=?, status='PENDING_PHOTOGRAPHER', updated_at=CURRENT_TIMESTAMP
+            WHERE inquiry_id=? AND status='PENDING_CLIENT'""", (starts_at, ends_at, location, inquiry_id))
+        db.commit()
+        return cur.rowcount > 0
+
+def confirm_schedule_request(inquiry_id: int, photographer_email: str, call_time: str, meeting_location: str) -> bool:
+    with sqlite3.connect(DB_PATH) as db:
+        _ensure_schema(db)
+        row = db.execute("SELECT photographer_email, status FROM schedule_requests WHERE inquiry_id=?", (inquiry_id,)).fetchone()
+        if not row or row[0].lower() != photographer_email.lower() or row[1] != 'PENDING_PHOTOGRAPHER': return False
+        cur = db.execute("""UPDATE inquiries SET status='SCHEDULED', call_time=?, meeting_location=?, updated_at=CURRENT_TIMESTAMP
+            WHERE id=? AND status IN ('CLIENT_CONFIRMED', 'SCHEDULED')""", (call_time, meeting_location, inquiry_id))
+        if cur.rowcount:
+            db.execute("UPDATE schedule_requests SET status='CONFIRMED', selected_starts_at=?, selected_location=?, updated_at=CURRENT_TIMESTAMP WHERE inquiry_id=?", (call_time, meeting_location, inquiry_id))
+            _record_event(db, inquiry_id, 'SHOOT_SCHEDULED', {'call_time': call_time, 'meeting_location': meeting_location})
+        db.commit()
+        return cur.rowcount > 0
+
 def get_inquiry(inquiry_id: int) -> dict | None:
     rows = [r for r in list_inquiries() if r["id"] == inquiry_id]
     return rows[0] if rows else None
+
+def list_inquiry_messages(inquiry_id: int, reader_role: str | None = None) -> list[dict]:
+    with sqlite3.connect(DB_PATH) as db:
+        db.row_factory = sqlite3.Row
+        _ensure_schema(db)
+        if reader_role == "client":
+            db.execute("UPDATE inquiry_messages SET read_by_client_at=CURRENT_TIMESTAMP WHERE inquiry_id=? AND sender_role='photographer' AND read_by_client_at IS NULL", (inquiry_id,))
+        elif reader_role == "photographer":
+            db.execute("UPDATE inquiry_messages SET read_by_photographer_at=CURRENT_TIMESTAMP WHERE inquiry_id=? AND sender_role='client' AND read_by_photographer_at IS NULL", (inquiry_id,))
+        rows = [dict(row) for row in db.execute(
+            "SELECT id, inquiry_id, sender_role, sender_name, body, created_at FROM inquiry_messages WHERE inquiry_id=? ORDER BY id",
+            (inquiry_id,),
+        ).fetchall()]
+        db.commit()
+        return rows
+
+def unread_message_counts(inquiry_ids: list[int], recipient_role: str) -> dict[int, int]:
+    if not inquiry_ids or recipient_role not in {"client", "photographer"}:
+        return {}
+    read_column = "read_by_client_at" if recipient_role == "client" else "read_by_photographer_at"
+    sender_role = "photographer" if recipient_role == "client" else "client"
+    placeholders = ",".join("?" for _ in inquiry_ids)
+    with sqlite3.connect(DB_PATH) as db:
+        db.row_factory = sqlite3.Row
+        _ensure_schema(db)
+        rows = db.execute(
+            f"SELECT inquiry_id, COUNT(*) AS count FROM inquiry_messages WHERE inquiry_id IN ({placeholders}) AND sender_role=? AND {read_column} IS NULL GROUP BY inquiry_id",
+            [*inquiry_ids, sender_role],
+        ).fetchall()
+    return {int(row["inquiry_id"]): int(row["count"]) for row in rows}
+
+def message_summaries(inquiry_ids: list[int]) -> dict[int, dict]:
+    """Return lightweight conversation metadata for inquiry list views."""
+    if not inquiry_ids:
+        return {}
+    placeholders = ",".join("?" for _ in inquiry_ids)
+    with sqlite3.connect(DB_PATH) as db:
+        db.row_factory = sqlite3.Row
+        _ensure_schema(db)
+        rows = db.execute(
+            f"SELECT id, inquiry_id, sender_role, sender_name, body, created_at FROM inquiry_messages WHERE inquiry_id IN ({placeholders}) ORDER BY inquiry_id, id DESC",
+            inquiry_ids,
+        ).fetchall()
+    summaries: dict[int, dict] = {}
+    for row in rows:
+        inquiry_id = int(row["inquiry_id"])
+        summary = summaries.setdefault(inquiry_id, {"message_count": 0, "latest_message": None})
+        summary["message_count"] += 1
+        if summary["latest_message"] is None:
+            summary["latest_message"] = {
+                "body": row["body"], "sender_name": row["sender_name"],
+                "sender_role": row["sender_role"], "created_at": row["created_at"],
+            }
+    return summaries
+
+def add_inquiry_message(inquiry_id: int, sender_role: str, sender_name: str, body: str) -> dict | None:
+    with sqlite3.connect(DB_PATH) as db:
+        db.row_factory = sqlite3.Row
+        _ensure_schema(db)
+        if not db.execute("SELECT 1 FROM inquiries WHERE id=?", (inquiry_id,)).fetchone():
+            return None
+        cursor = db.execute(
+            "INSERT INTO inquiry_messages (inquiry_id, sender_role, sender_name, body) VALUES (?, ?, ?, ?)",
+            (inquiry_id, sender_role, sender_name.strip(), body.strip()),
+        )
+        db.commit()
+        row = db.execute(
+            "SELECT id, inquiry_id, sender_role, sender_name, body, created_at FROM inquiry_messages WHERE id=?",
+            (cursor.lastrowid,),
+        ).fetchone()
+        return dict(row) if row else None
 
 def append_reply(inquiry_id: int, answers: str) -> dict | None:
     record = get_inquiry(inquiry_id)

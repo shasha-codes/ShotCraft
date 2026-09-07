@@ -2,13 +2,14 @@
 
 from fastapi import BackgroundTasks, FastAPI, HTTPException
 from fastapi.responses import FileResponse, RedirectResponse
-from .storage import append_reply, inquiry_timeline, list_inquiries, record_event, save_inquiry, update_analysis, create_user, authenticate_user, save_moodboard, save_production_pack, approve_production_pack, set_client_decision, schedule_inquiry
+from .storage import add_inquiry_message, append_reply, confirm_schedule_request, get_schedule_request, inquiry_timeline, list_inquiries, list_inquiry_messages, message_summaries, record_event, save_inquiry, save_schedule_suggestions, scheduled_times, select_schedule_suggestion, unread_message_counts, update_analysis, create_user, authenticate_user, save_moodboard, save_production_pack, approve_production_pack, set_client_decision, schedule_inquiry
 from fastapi.staticfiles import StaticFiles
 import json
+from datetime import datetime, timedelta
 from urllib.parse import urlencode
 from urllib.request import urlopen
 
-from .agent import analyze_inquiry, build_production_pack, create_creative_brief, create_moodboard
+from .agent import analyze_inquiry, build_production_pack, create_creative_brief, create_moodboard, recommend_schedule_slots
 from .images import generate_moodboard_images
 from .models import (
     BriefRequest,
@@ -24,6 +25,8 @@ from .models import (
     AuthRequest,
     ClientDecision,
     ScheduleRequest,
+    ScheduleSelection,
+    InquiryMessageCreate,
 )
 
 app = FastAPI(title="ShotCraft API", version="0.1.0")
@@ -151,6 +154,13 @@ def get_inquiries(client_email: str | None = None, photographer_email: str | Non
             # Keep legacy records visible until they are explicitly assigned.
             return not target or target.lower() == photographer_email.lower()
         inquiries = [item for item in inquiries if assigned(item)]
+    recipient_role = "client" if client_email else "photographer" if photographer_email else None
+    if recipient_role:
+        counts = unread_message_counts([int(item["id"]) for item in inquiries], recipient_role)
+        summaries = message_summaries([int(item["id"]) for item in inquiries])
+        for item in inquiries:
+            item["unread_messages"] = counts.get(int(item["id"]), 0)
+            item.update(summaries.get(int(item["id"]), {"message_count": 0, "latest_message": None}))
     return inquiries
 
 @app.get("/api/inquiries/{inquiry_id}")
@@ -163,6 +173,21 @@ def get_inquiry_detail(inquiry_id: int) -> dict:
 @app.get("/api/inquiries/{inquiry_id}/timeline")
 def get_inquiry_timeline(inquiry_id: int) -> dict:
     return {"inquiry_id": inquiry_id, "timeline": inquiry_timeline(inquiry_id)}
+
+@app.get("/api/inquiries/{inquiry_id}/messages")
+def get_inquiry_messages(inquiry_id: int, reader_role: str | None = None) -> list[dict]:
+    if not next((item for item in list_inquiries() if item["id"] == inquiry_id), None):
+        raise HTTPException(status_code=404, detail="Inquiry not found.")
+    if reader_role not in {None, "client", "photographer"}:
+        raise HTTPException(status_code=422, detail="reader_role must be client or photographer.")
+    return list_inquiry_messages(inquiry_id, reader_role)
+
+@app.post("/api/inquiries/{inquiry_id}/messages", status_code=201)
+def post_inquiry_message(inquiry_id: int, message: InquiryMessageCreate) -> dict:
+    created = add_inquiry_message(inquiry_id, message.sender_role, message.sender_name, message.body)
+    if not created:
+        raise HTTPException(status_code=404, detail="Inquiry not found.")
+    return created
 
 @app.post("/api/inquiries/{inquiry_id}/reply")
 def reply_to_inquiry(inquiry_id: int, reply: InquiryReply, background_tasks: BackgroundTasks) -> dict[str, object]:
@@ -201,6 +226,133 @@ def client_change_request(inquiry_id: int, decision: ClientDecision) -> dict[str
 def schedule_project(inquiry_id: int, schedule: ScheduleRequest) -> dict[str, object]:
     if not schedule_inquiry(inquiry_id, schedule.call_time, schedule.meeting_location):
         raise HTTPException(status_code=409, detail="The client must confirm the production plan before it can be scheduled.")
+    return {"id": inquiry_id, "status": "SCHEDULED"}
+
+def _parse_datetime(value: str) -> datetime | None:
+    try:
+        if not isinstance(value, str) or not value:
+            return None
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).replace(tzinfo=None)
+    except (TypeError, ValueError):
+        return None
+
+def _slots_overlap(start: datetime, end: datetime, busy: list[dict]) -> bool:
+    for item in busy:
+        busy_start = _parse_datetime(item.get("starts_at", ""))
+        busy_end = _parse_datetime(item.get("ends_at", "")) or (busy_start + timedelta(hours=2) if busy_start else None)
+        if busy_start and busy_end and start < busy_end and end > busy_start:
+            return True
+    return False
+
+def _fallback_schedule_slots(record: dict, busy: list[dict]) -> list[dict]:
+    payload = json.loads(record.get("payload") or "{}")
+    preferred = _parse_datetime(payload.get("shoot_date", "")) or datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+    duration = max(1, min(8, int(payload.get("duration_hours") or 2)))
+    location = payload.get("location") or payload.get("city") or "Location to be confirmed"
+    slots: list[dict] = []
+    for day_offset in range(14):
+        day = preferred + timedelta(days=day_offset)
+        if day.weekday() >= 5: continue
+        for hour in (10, 13, 16):
+            start = day.replace(hour=hour, minute=0)
+            end = start + timedelta(hours=duration)
+            if end.hour > 18 or _slots_overlap(start, end, busy): continue
+            slots.append({"starts_at": start.isoformat(timespec="minutes"), "ends_at": end.isoformat(timespec="minutes"), "location": location, "rationale": "Fits the requested timing and avoids the photographer’s confirmed sessions."})
+            if len(slots) == 3: return slots
+    return slots
+
+def _inquiry_schedule_location(record: dict) -> str:
+    payload = json.loads(record.get("payload") or "{}")
+    if payload.get("location"):
+        return str(payload["location"])
+    message = str(payload.get("message") or "")
+    for city in ("Seattle", "New Delhi", "Delhi", "Bangalore"):
+        if city.lower() in message.lower():
+            return city
+    if record.get("meeting_location"):
+        return str(record["meeting_location"])
+    return "Location to be confirmed with your photographer"
+
+def _valid_suggestions(suggestions: list[dict], busy: list[dict], preferred_date: datetime | None, location: str) -> list[dict]:
+    valid = []
+    for suggestion in suggestions:
+        start, end = _parse_datetime(suggestion.get("starts_at", "")), _parse_datetime(suggestion.get("ends_at", ""))
+        if not start or not end or end <= start or _slots_overlap(start, end, busy): continue
+        if preferred_date and start.date() != preferred_date.date(): continue
+        valid.append({"starts_at": start.isoformat(timespec="minutes"), "ends_at": end.isoformat(timespec="minutes"), "location": location, "rationale": "Available on your requested date and clear of the photographer’s existing shoots."})
+    return valid[:3]
+
+@app.get("/api/calendar")
+def get_calendar(client_email: str | None = None, photographer_email: str | None = None) -> dict:
+    if not client_email and not photographer_email:
+        raise HTTPException(status_code=422, detail="client_email or photographer_email is required.")
+    records = get_inquiries(client_email=client_email, photographer_email=photographer_email)
+    entries = []
+    for record in records:
+        request = get_schedule_request(int(record["id"]))
+        if record.get("status") == "SCHEDULED" and record.get("call_time"):
+            entries.append({"inquiry_id": record["id"], "kind": "scheduled", "starts_at": record["call_time"], "location": record.get("meeting_location"), "status": "CONFIRMED"})
+        if request and request.get("status") == "PENDING_PHOTOGRAPHER":
+            entries.append({"inquiry_id": record["id"], "kind": "requested", "starts_at": request.get("selected_starts_at"), "ends_at": request.get("selected_ends_at"), "location": request.get("selected_location"), "status": request.get("status")})
+    return {"entries": entries}
+
+@app.get("/api/inquiries/{inquiry_id}/schedule-recommendations")
+def get_schedule_recommendations(inquiry_id: int) -> dict:
+    record = next((item for item in list_inquiries() if item["id"] == inquiry_id), None)
+    if not record: raise HTTPException(status_code=404, detail="Inquiry not found.")
+    request = get_schedule_request(inquiry_id)
+    if request and request.get("status") == "PENDING_CLIENT":
+        preferred = _parse_datetime(json.loads(record.get("payload") or "{}").get("shoot_date", ""))
+        expected_location = _inquiry_schedule_location(record)
+        suggestions = request.get("suggestions") or []
+        if preferred and any((_parse_datetime(item.get("starts_at")) or datetime.min).date() != preferred.date() for item in suggestions):
+            request = None
+        elif any(item.get("location") != expected_location for item in suggestions):
+            request = None
+    return request or {"inquiry_id": inquiry_id, "status": None, "suggestions": []}
+
+@app.post("/api/inquiries/{inquiry_id}/schedule-recommendations")
+def create_schedule_recommendations(inquiry_id: int) -> dict:
+    record = next((item for item in list_inquiries() if item["id"] == inquiry_id), None)
+    if not record: raise HTTPException(status_code=404, detail="Inquiry not found.")
+    if record.get("status") not in {"CLIENT_CONFIRMED", "SCHEDULED"}:
+        raise HTTPException(status_code=409, detail="Confirm the production plan before choosing a shoot time.")
+    inquiry = Inquiry(**json.loads(record["payload"]))
+    photographer_email = inquiry.photographer_email or ""
+    busy = [item for item in scheduled_times(photographer_email) if int(item.get("inquiry_id", -1)) != inquiry_id]
+    preferred_date = _parse_datetime(inquiry.shoot_date or "")
+    location = _inquiry_schedule_location(record)
+    try:
+        suggestions = _valid_suggestions([item.model_dump() for item in recommend_schedule_slots(inquiry, busy)], busy, preferred_date, location)
+    except Exception:
+        suggestions = []
+    if len(suggestions) < 3:
+        existing = {(item["starts_at"], item["ends_at"]) for item in suggestions}
+        suggestions.extend(item for item in _fallback_schedule_slots(record, busy) if (item["starts_at"], item["ends_at"]) not in existing)
+    if not suggestions:
+        raise HTTPException(status_code=409, detail="No conflict-free times are available yet. Please contact the photographer.")
+    return save_schedule_suggestions(inquiry_id, photographer_email, suggestions[:3])
+
+@app.post("/api/inquiries/{inquiry_id}/schedule-selection")
+def select_schedule_time(inquiry_id: int, selection: ScheduleSelection) -> dict:
+    request = get_schedule_request(inquiry_id)
+    if not request: raise HTTPException(status_code=409, detail="Get recommended times before making a selection.")
+    matches = any(item["starts_at"] == selection.starts_at and item["ends_at"] == selection.ends_at for item in request["suggestions"])
+    if not matches: raise HTTPException(status_code=422, detail="Please select one of the recommended times.")
+    if not select_schedule_suggestion(inquiry_id, selection.starts_at, selection.ends_at, selection.location):
+        raise HTTPException(status_code=409, detail="This time is no longer available for selection.")
+    return get_schedule_request(inquiry_id) or {}
+
+@app.post("/api/inquiries/{inquiry_id}/schedule-confirmation")
+def confirm_schedule_time(inquiry_id: int, schedule: ScheduleRequest, photographer_email: str) -> dict:
+    start = _parse_datetime(schedule.call_time)
+    if not start:
+        raise HTTPException(status_code=422, detail="Provide a valid date and time.")
+    busy = [item for item in scheduled_times(photographer_email) if int(item.get("inquiry_id", -1)) != inquiry_id]
+    if _slots_overlap(start, start + timedelta(hours=2), busy):
+        raise HTTPException(status_code=409, detail="That time overlaps another shoot or client time request. Choose a different time.")
+    if not confirm_schedule_request(inquiry_id, photographer_email, schedule.call_time, schedule.meeting_location):
+        raise HTTPException(status_code=409, detail="This request is not ready for photographer confirmation.")
     return {"id": inquiry_id, "status": "SCHEDULED"}
 
 
