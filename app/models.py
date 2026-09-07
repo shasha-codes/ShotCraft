@@ -23,10 +23,25 @@ class InquiryReply(BaseModel):
 class ClientDecision(BaseModel):
     note: str | None = None
 
+class InquiryMessageCreate(BaseModel):
+    body: str = Field(min_length=1, max_length=4000)
+    sender_role: str = Field(pattern="^(client|photographer)$")
+    sender_name: str = Field(min_length=1, max_length=120)
+
 class ScheduleRequest(BaseModel):
     call_time: str = Field(min_length=1)
     meeting_location: str = Field(min_length=1)
 
+class ScheduleSuggestion(BaseModel):
+    starts_at: str = Field(min_length=1)
+    ends_at: str = Field(min_length=1)
+    location: str = Field(min_length=1)
+    rationale: str = Field(min_length=1)
+
+class ScheduleSelection(BaseModel):
+    starts_at: str = Field(min_length=1)
+    ends_at: str = Field(min_length=1)
+    location: str = Field(min_length=1)
 
 class InquiryAnalysis(BaseModel):
     status: str
