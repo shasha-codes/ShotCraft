@@ -2,13 +2,13 @@
 
 from fastapi import BackgroundTasks, FastAPI, HTTPException
 from fastapi.responses import FileResponse, RedirectResponse
-from .storage import append_reply, list_inquiries, save_inquiry, update_analysis, create_user, authenticate_user, save_moodboard, save_production_pack, approve_production_pack, set_client_decision, schedule_inquiry
+from .storage import append_reply, inquiry_timeline, list_inquiries, record_event, save_inquiry, update_analysis, create_user, authenticate_user, save_moodboard, save_production_pack, approve_production_pack, set_client_decision, schedule_inquiry
 from fastapi.staticfiles import StaticFiles
 import json
 from urllib.parse import urlencode
 from urllib.request import urlopen
 
-from .agent import analyze_inquiry, create_creative_brief, create_moodboard
+from .agent import analyze_inquiry, build_production_pack, create_creative_brief, create_moodboard
 from .images import generate_moodboard_images
 from .models import (
     BriefRequest,
@@ -124,6 +124,8 @@ def process_inquiry(inquiry_id: int, inquiry: Inquiry) -> None:
             result.questions.append("How many final edited photos would you like delivered?")
         status = "NEEDS_INFORMATION" if result.missing_information else "READY_FOR_REVIEW"
         update_analysis(inquiry_id, status, result.model_dump())
+        if not result.missing_information:
+            record_event(inquiry_id, "QUESTIONS_ANSWERED")
         print(f"[ShotCraft notification] Inquiry {inquiry_id}: {status}")
     except Exception as exc:
         update_analysis(inquiry_id, "PROCESSING_ERROR", {"error": str(exc)})
@@ -155,7 +157,12 @@ def get_inquiries(client_email: str | None = None, photographer_email: str | Non
 def get_inquiry_detail(inquiry_id: int) -> dict:
     record = next((r for r in list_inquiries() if r["id"] == inquiry_id), None)
     if not record: return {"error": "Inquiry not found"}
+    record["timeline"] = inquiry_timeline(inquiry_id)
     return record
+
+@app.get("/api/inquiries/{inquiry_id}/timeline")
+def get_inquiry_timeline(inquiry_id: int) -> dict:
+    return {"inquiry_id": inquiry_id, "timeline": inquiry_timeline(inquiry_id)}
 
 @app.post("/api/inquiries/{inquiry_id}/reply")
 def reply_to_inquiry(inquiry_id: int, reply: InquiryReply, background_tasks: BackgroundTasks) -> dict[str, object]:
@@ -169,6 +176,16 @@ def approve_production(inquiry_id: int) -> dict[str, object]:
     if not approve_production_pack(inquiry_id):
         return {"error": "Production pack not found."}
     return {"id": inquiry_id, "production_approved": True, "message": "Production pack approved."}
+
+@app.put("/api/inquiries/{inquiry_id}/production-pack", response_model=ProductionPack)
+def update_production_pack(inquiry_id: int, pack: ProductionPack) -> ProductionPack:
+    record = next((item for item in list_inquiries() if item["id"] == inquiry_id), None)
+    if not record:
+        raise HTTPException(status_code=404, detail="Inquiry not found.")
+    if record["status"] in {"CLIENT_CONFIRMED", "SCHEDULED"}:
+        raise HTTPException(status_code=409, detail="This plan is already confirmed. Create a change request before revising it.")
+    save_production_pack(inquiry_id, pack.model_dump(), draft=True)
+    return pack
 
 @app.post("/api/inquiries/{inquiry_id}/client-confirm")
 def client_confirm(inquiry_id: int, decision: ClientDecision) -> dict[str, object]:
@@ -238,38 +255,48 @@ def create_and_generate_moodboard_endpoint(request: MoodboardRequest) -> Moodboa
         generated = generate_moodboard_images(moodboard)
     except Exception as exc:
         print(f"[ShotCraft moodboard] Generation failed: {exc}")
-        raise HTTPException(status_code=502, detail="Moodboard generation could not be completed. Please try again in a moment.") from exc
+        root = exc
+        while getattr(root, "__cause__", None):
+            root = root.__cause__
+        message = str(root).lower()
+        if "moderation" in message or "safety system" in message:
+            detail = "The image provider rejected this visual prompt for safety. Try again to generate a safer variation."
+        elif "api key" in message or "authentication" in message or "401" in message:
+            detail = "Image generation is not configured on the server. Add a valid image-provider API key and restart the app."
+        elif "quota" in message or "rate limit" in message or "429" in message:
+            detail = "The image provider is temporarily rate-limited or out of credits. Try again later."
+        else:
+            detail = "The image provider could not complete this request. Check the server logs for the provider error and try again."
+        raise HTTPException(status_code=502, detail=detail) from exc
     result = MoodboardResult(moodboard=moodboard, generated=generated)
     inquiry_id = getattr(request, "inquiry_id", None)
-    if inquiry_id: save_moodboard(inquiry_id, result.model_dump())
+    if inquiry_id:
+        record_event(inquiry_id, "BRIEF_APPROVED")
+        save_moodboard(inquiry_id, result.model_dump())
     return result
 
 @app.post("/api/production-packs/create", response_model=ProductionPack)
 def create_production_pack(request: BriefRequest, inquiry_id: int | None = None) -> ProductionPack:
     """Create a practical shoot-day plan from the approved brief."""
     b = request.inquiry
-    brief = request.inquiry.message
-    weather_note = "Check the Seattle forecast 48 hours and again 3 hours before call time."
-    if b.shoot_date:
+    target_inquiry_id = inquiry_id or request.inquiry_id
+    record = next((item for item in list_inquiries() if item["id"] == target_inquiry_id), None) if target_inquiry_id else None
+    moodboard = json.loads(record["moodboard"]) if record and record.get("moodboard") else None
+    try:
+        pack = build_production_pack(b, moodboard)
+    except Exception as exc:
+        print(f"[ShotCraft production pack] Generation failed: {exc}")
+        raise HTTPException(status_code=502, detail="The shoot-specific production pack could not be generated. Please try again.") from exc
+
+    if b.shoot_date and "seattle" in b.message.lower():
         try:
             params = urlencode({"latitude": 47.6062, "longitude": -122.3321, "start_date": b.shoot_date, "end_date": b.shoot_date, "daily": "weather_code,temperature_2m_max,precipitation_probability_max,wind_speed_10m_max", "timezone": "America/Los_Angeles"})
             with urlopen("https://api.open-meteo.com/v1/forecast?" + params, timeout=3) as response:
                 forecast = json.loads(response.read())
             daily = forecast.get("daily", {})
-            weather_note = f"Seattle forecast for {b.shoot_date}: high {daily.get('temperature_2m_max', ['—'])[0]}°C, rain probability {daily.get('precipitation_probability_max', ['—'])[0]}%, wind up to {daily.get('wind_speed_10m_max', ['—'])[0]} km/h. Recheck 3 hours before call time."
+            pack.weather_note = f"Seattle forecast for {b.shoot_date}: high {daily.get('temperature_2m_max', ['—'])[0]}°C, rain probability {daily.get('precipitation_probability_max', ['—'])[0]}%, wind up to {daily.get('wind_speed_10m_max', ['—'])[0]} km/h. Recheck 3 hours before call time."
         except Exception:
             pass
-    pack = ProductionPack(
-        title=f"{b.client_name} · Shoot production pack",
-        location_plan=["Primary: Seattle Center / Space Needle plaza for recognizable architecture and open sightlines.", "Alternate: Pike Place waterfront or a covered Pioneer Square brick arcade.", "Confirm permit, parking, restrooms, and a nearby indoor fallback."],
-        shot_list=["Establishing environmental portrait", "Three-quarter hero portrait", "Full-body wardrobe frame", "Close-up lighting portrait", "Walking and candid movement frames"],
-        lighting_plan=["Prioritize overcast or open shade for soft light.", "Carry a 5-in-1 reflector and small LED for edge light.", "Expose for skin and protect highlights in the sky."],
-        wardrobe_checklist=["Blue polo shirt", "Black jeans", "Boots", "Black sunglasses", "Lint roller and backup shirt"],
-        call_sheet={"client": b.client_name, "email": b.client_email, "date": b.shoot_date or "To be confirmed", "duration": "2 hours", "budget": f"${b.budget or 'TBD'}"},
-        weather_note=weather_note,
-        backup_plan="If rain or unsafe conditions are forecast, move to a covered architectural location and preserve the cinematic palette."
-    )
-    target_inquiry_id = inquiry_id or request.inquiry_id
     if target_inquiry_id:
         save_production_pack(target_inquiry_id, pack.model_dump())
     return pack
