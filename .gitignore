@@ -7,3 +7,6 @@ __pycache__/
 
 # Local runtime data (contains test users, inquiries, and hashed passwords)
 data/shotcraft.db
+
+# Runtime image-generation output. Persist production images in S3 rather than Git.
+static/generated/
