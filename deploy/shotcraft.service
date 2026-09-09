@@ -1,0 +1,18 @@
+[Unit]
+Description=ShotCraft FastAPI application
+After=network.target
+
+[Service]
+Type=simple
+User=shotcraft
+Group=shotcraft
+WorkingDirectory=/opt/shotcraft/app
+EnvironmentFile=/etc/shotcraft/shotcraft.env
+ExecStart=/opt/shotcraft/venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000 --proxy-headers
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

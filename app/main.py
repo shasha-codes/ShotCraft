@@ -38,6 +38,12 @@ app = FastAPI(title="ShotCraft API", version="0.1.0")
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
 
+@app.get("/healthz")
+def healthz() -> dict[str, str]:
+    """Minimal unauthenticated health check for the EC2 service and reverse proxy."""
+    return {"status": "ok"}
+
+
 @app.get("/")
 def health_check() -> FileResponse:
     return FileResponse("static/index.html")
