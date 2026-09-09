@@ -216,6 +216,16 @@ def authenticate_user(email: str, password: str, user_type: str) -> dict | None:
     return {"name":row[0],"email":row[1],"user_type":row[3]}
 
 
+def list_photographers() -> list[dict[str, str]]:
+    """Return the public directory used when a client chooses a photographer."""
+    with sqlite3.connect(DB_PATH) as db:
+        _ensure_schema(db)
+        rows = db.execute(
+            "SELECT name, email FROM users WHERE user_type='photographer' ORDER BY lower(name), lower(email)"
+        ).fetchall()
+    return [{"name": str(row[0]), "email": str(row[1])} for row in rows]
+
+
 def get_client_shoot_ideas(client_email: str, history_signature: str) -> list[dict] | None:
     """Return a cached set only when it reflects the client's current history."""
     with sqlite3.connect(DB_PATH) as db:

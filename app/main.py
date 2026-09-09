@@ -2,7 +2,7 @@
 
 from fastapi import BackgroundTasks, FastAPI, HTTPException
 from fastapi.responses import FileResponse, RedirectResponse
-from .storage import add_inquiry_message, append_reply, change_request_summaries, confirm_schedule_request, get_change_request, get_schedule_request, get_client_shoot_ideas, inquiry_event_flags, inquiry_timeline, list_inquiries, list_inquiry_messages, message_summaries, pre_shoot_checkin_summaries, record_event, resolve_change_request, save_change_request, save_client_shoot_ideas, save_inquiry, save_pre_shoot_checkin, save_schedule_suggestions, scheduled_times, select_schedule_suggestion, unread_message_counts, update_analysis, update_meeting_location, create_user, authenticate_user, save_moodboard, save_production_pack, approve_production_pack, set_client_decision, schedule_inquiry
+from .storage import add_inquiry_message, append_reply, change_request_summaries, confirm_schedule_request, get_change_request, get_schedule_request, get_client_shoot_ideas, inquiry_event_flags, inquiry_timeline, list_inquiries, list_inquiry_messages, list_photographers, message_summaries, pre_shoot_checkin_summaries, record_event, resolve_change_request, save_change_request, save_client_shoot_ideas, save_inquiry, save_pre_shoot_checkin, save_schedule_suggestions, scheduled_times, select_schedule_suggestion, unread_message_counts, update_analysis, update_meeting_location, create_user, authenticate_user, save_moodboard, save_production_pack, approve_production_pack, set_client_decision, schedule_inquiry
 from fastapi.staticfiles import StaticFiles
 import json
 import hashlib
@@ -61,6 +61,12 @@ def signup(request: AuthRequest) -> dict:
 @app.post("/api/auth/login")
 def login(request: AuthRequest) -> dict:
     return authenticate_user(request.email, request.password, request.user_type or "") or {"error": "Invalid email or password."}
+
+
+@app.get("/api/photographers")
+def get_photographers() -> list[dict[str, str]]:
+    """A small client-facing directory of registered photographer workspaces."""
+    return list_photographers()
 
 
 @app.get("/client")
