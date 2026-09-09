@@ -2,14 +2,15 @@
 
 from fastapi import BackgroundTasks, FastAPI, HTTPException
 from fastapi.responses import FileResponse, RedirectResponse
-from .storage import add_inquiry_message, append_reply, confirm_schedule_request, get_schedule_request, inquiry_timeline, list_inquiries, list_inquiry_messages, message_summaries, record_event, save_inquiry, save_schedule_suggestions, scheduled_times, select_schedule_suggestion, unread_message_counts, update_analysis, create_user, authenticate_user, save_moodboard, save_production_pack, approve_production_pack, set_client_decision, schedule_inquiry
+from .storage import add_inquiry_message, append_reply, change_request_summaries, confirm_schedule_request, get_change_request, get_schedule_request, get_client_shoot_ideas, inquiry_event_flags, inquiry_timeline, list_inquiries, list_inquiry_messages, message_summaries, pre_shoot_checkin_summaries, record_event, resolve_change_request, save_change_request, save_client_shoot_ideas, save_inquiry, save_pre_shoot_checkin, save_schedule_suggestions, scheduled_times, select_schedule_suggestion, unread_message_counts, update_analysis, update_meeting_location, create_user, authenticate_user, save_moodboard, save_production_pack, approve_production_pack, set_client_decision, schedule_inquiry
 from fastapi.staticfiles import StaticFiles
 import json
+import hashlib
 from datetime import datetime, timedelta
 from urllib.parse import urlencode
 from urllib.request import urlopen
 
-from .agent import analyze_inquiry, build_production_pack, create_creative_brief, create_moodboard, recommend_schedule_slots
+from .agent import analyze_inquiry, assess_change_request, build_production_pack, create_creative_brief, create_moodboard, draft_change_client_update, draft_client_update, recommend_next_shoot_ideas, recommend_schedule_slots
 from .images import generate_moodboard_images
 from .models import (
     BriefRequest,
@@ -27,6 +28,10 @@ from .models import (
     ScheduleRequest,
     ScheduleSelection,
     InquiryMessageCreate,
+    ClientUpdateDraft,
+    ChangeApproval,
+    ChangeAssessment,
+    ShootIdeaRecommendations,
 )
 
 app = FastAPI(title="ShotCraft API", version="0.1.0")
@@ -161,13 +166,52 @@ def get_inquiries(client_email: str | None = None, photographer_email: str | Non
         for item in inquiries:
             item["unread_messages"] = counts.get(int(item["id"]), 0)
             item.update(summaries.get(int(item["id"]), {"message_count": 0, "latest_message": None}))
+    flags = inquiry_event_flags([int(item["id"]) for item in inquiries])
+    changes = change_request_summaries([int(item["id"]) for item in inquiries])
+    checkins = pre_shoot_checkin_summaries([int(item["id"]) for item in inquiries])
+    for item in inquiries:
+        item["client_update_sent"] = "CLIENT_UPDATE_SENT" in flags.get(int(item["id"]), set())
+        item["change_request"] = changes.get(int(item["id"]))
+        item["pre_shoot_checkin"] = checkins.get(int(item["id"]))
     return inquiries
+
+@app.get("/api/client/shoot-ideas", response_model=ShootIdeaRecommendations)
+def get_client_shoot_ideas_endpoint(client_email: str, refresh: bool = False) -> ShootIdeaRecommendations:
+    """Offer AI concepts without creating an inquiry or persisting a draft."""
+    records = [item for item in list_inquiries() if item.get("client_email", "").lower() == client_email.lower()]
+    history: list[dict] = []
+    for record in records[-8:]:
+        try:
+            inquiry = json.loads(record.get("payload", "{}"))
+            analysis = json.loads(record.get("analysis", "{}"))
+        except json.JSONDecodeError:
+            continue
+        history.append({
+            "concept_name": analysis.get("concept_name"),
+            "summary": analysis.get("summary"),
+            "message": inquiry.get("message"),
+            "shoot_date": inquiry.get("shoot_date"),
+        })
+    if not history:
+        history = [{"message": "The client has not planned a shoot yet. Offer broad, approachable portrait concepts."}]
+    signature = hashlib.sha256(json.dumps(history, sort_keys=True).encode()).hexdigest()
+    cached = None if refresh else get_client_shoot_ideas(client_email, signature)
+    if cached:
+        return ShootIdeaRecommendations(ideas=cached)
+    try:
+        recommendations = recommend_next_shoot_ideas(history)
+        save_client_shoot_ideas(client_email, signature, [idea.model_dump() for idea in recommendations.ideas])
+        return recommendations
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail="ShotCraft could not generate ideas right now.") from exc
+
 
 @app.get("/api/inquiries/{inquiry_id}")
 def get_inquiry_detail(inquiry_id: int) -> dict:
     record = next((r for r in list_inquiries() if r["id"] == inquiry_id), None)
     if not record: return {"error": "Inquiry not found"}
     record["timeline"] = inquiry_timeline(inquiry_id)
+    record["pre_shoot_checkin"] = pre_shoot_checkin_summaries([inquiry_id]).get(inquiry_id)
     return record
 
 @app.get("/api/inquiries/{inquiry_id}/timeline")
@@ -182,12 +226,142 @@ def get_inquiry_messages(inquiry_id: int, reader_role: str | None = None) -> lis
         raise HTTPException(status_code=422, detail="reader_role must be client or photographer.")
     return list_inquiry_messages(inquiry_id, reader_role)
 
+def _fallback_change_assessment(message: str) -> ChangeAssessment:
+    lower = message.lower()
+    impacts, updates = [], {}
+    decision, reason, missing = "FOLLOW_UP", "The request needs one or more details before the plan can be safely changed.", []
+    if any(word in lower for word in ("location", "venue", "indoor", "outdoor", "studio", "park")):
+        impacts.extend(["Location plan", "Lighting plan", "Weather contingency", "Call sheet"])
+        missing.append("Preferred new location")
+    if any(word in lower for word in ("time", "date", "schedule", "reschedule")):
+        impacts.extend(["Call sheet", "Shoot schedule"])
+        decision, reason = "REVIEW", "A date or time change affects a confirmed booking and needs photographer approval."
+    if any(word in lower for word in ("wardrobe", "outfit", "dress", "clothes")):
+        impacts.append("Wardrobe checklist")
+        missing.append("Revised wardrobe details")
+    if any(word in lower for word in ("photo", "image", "deliverable", "edit")):
+        impacts.append("Deliverables and budget")
+        decision, reason = "REVIEW", "A deliverable or budget change needs photographer approval before it becomes a commitment."
+    return ChangeAssessment(request_summary="Client requested a change to the current shoot plan.", impacts=impacts or ["Production plan"], proposed_updates=updates, decision=decision, decision_reason=reason, missing_information=missing)
+
+def process_change_request(inquiry_id: int, message: str) -> None:
+    record = next((item for item in list_inquiries() if item["id"] == inquiry_id), None)
+    if not record or not record.get("production_pack"):
+        return
+    inquiry = Inquiry(**json.loads(record["payload"]))
+    pack = json.loads(record["production_pack"])
+    existing = get_change_request(inquiry_id)
+    source_message = message
+    if existing and existing.get("status") == "PENDING":
+        source_message = f"Original client request:\n{existing['source_message']}\n\nClient follow-up:\n{message}"
+    try:
+        assessment = assess_change_request(inquiry, pack, source_message)
+    except Exception as exc:
+        print(f"[ShotCraft change request] Assessment failed: {exc}")
+        assessment = _fallback_change_assessment(source_message)
+    save_change_request(inquiry_id, source_message, assessment.model_dump())
+
 @app.post("/api/inquiries/{inquiry_id}/messages", status_code=201)
-def post_inquiry_message(inquiry_id: int, message: InquiryMessageCreate) -> dict:
+def post_inquiry_message(inquiry_id: int, message: InquiryMessageCreate, background_tasks: BackgroundTasks) -> dict:
     created = add_inquiry_message(inquiry_id, message.sender_role, message.sender_name, message.body)
     if not created:
         raise HTTPException(status_code=404, detail="Inquiry not found.")
+    change_terms = ("change", "move", "reschedule", "location", "venue", "indoor", "outdoor", "time", "date", "wardrobe", "outfit", "deliverable")
+    pending_change = get_change_request(inquiry_id)
+    if message.sender_role == "client" and ((pending_change and pending_change.get("status") == "PENDING") or any(term in message.body.lower() for term in change_terms)):
+        background_tasks.add_task(process_change_request, inquiry_id, message.body)
     return created
+
+@app.get("/api/inquiries/{inquiry_id}/change-request")
+def get_inquiry_change_request(inquiry_id: int) -> dict:
+    request = get_change_request(inquiry_id)
+    if not request:
+        raise HTTPException(status_code=404, detail="No pending change request for this inquiry.")
+    return request
+
+@app.post("/api/inquiries/{inquiry_id}/pre-shoot-checkin")
+def confirm_pre_shoot_readiness(inquiry_id: int) -> dict:
+    record = next((item for item in list_inquiries() if item["id"] == inquiry_id), None)
+    if not record:
+        raise HTTPException(status_code=404, detail="Inquiry not found.")
+    if record.get("status") != "SCHEDULED":
+        raise HTTPException(status_code=409, detail="A shoot must be scheduled before confirming readiness.")
+    if not save_pre_shoot_checkin(inquiry_id, "READY"):
+        raise HTTPException(status_code=500, detail="Could not save the readiness check-in.")
+    return {"inquiry_id": inquiry_id, "status": "READY"}
+
+@app.post("/api/inquiries/{inquiry_id}/change-request/approve")
+def approve_inquiry_change_request(inquiry_id: int, approval: ChangeApproval) -> dict:
+    record = next((item for item in list_inquiries() if item["id"] == inquiry_id), None)
+    request = get_change_request(inquiry_id)
+    if not record or not request or request.get("status") != "PENDING":
+        raise HTTPException(status_code=409, detail="No pending change request is available to approve.")
+    if request["assessment"].get("decision") != "APPLY":
+        raise HTTPException(status_code=409, detail="This request needs more information or photographer review before the plan can be updated.")
+    pack = json.loads(record.get("production_pack") or "{}")
+    for section, items in (request["assessment"].get("proposed_updates") or {}).items():
+        if section in {"location_plan", "lighting_plan", "wardrobe_checklist"} and isinstance(items, list):
+            pack[section] = items
+    save_production_pack(inquiry_id, pack)
+    meeting_location = request["assessment"].get("confirmed_meeting_location")
+    if isinstance(meeting_location, str) and meeting_location.strip():
+        update_meeting_location(inquiry_id, meeting_location)
+    add_inquiry_message(inquiry_id, "photographer", "Photographer", approval.client_message)
+    resolve_change_request(inquiry_id)
+    return {"inquiry_id": inquiry_id, "status": "APPROVED"}
+
+@app.post("/api/inquiries/{inquiry_id}/change-request/follow-up")
+def send_change_request_follow_up(inquiry_id: int, approval: ChangeApproval) -> dict:
+    request = get_change_request(inquiry_id)
+    if not request or request.get("status") != "PENDING":
+        raise HTTPException(status_code=409, detail="No open change request is available for follow-up.")
+    created = add_inquiry_message(inquiry_id, "photographer", "Photographer", approval.client_message)
+    if not created:
+        raise HTTPException(status_code=404, detail="Inquiry not found.")
+    return {"inquiry_id": inquiry_id, "status": "PENDING", "message": "Follow-up sent. The plan remains unchanged."}
+
+@app.post("/api/inquiries/{inquiry_id}/change-request/client-update-draft", response_model=ClientUpdateDraft)
+def create_change_client_update_draft(inquiry_id: int) -> ClientUpdateDraft:
+    record = next((item for item in list_inquiries() if item["id"] == inquiry_id), None)
+    request = get_change_request(inquiry_id)
+    if not record or not request:
+        raise HTTPException(status_code=404, detail="No change request was found.")
+    inquiry = Inquiry(**json.loads(record["payload"]))
+    pack = json.loads(record.get("production_pack") or "{}")
+    try:
+        return draft_change_client_update(inquiry, pack, request["source_message"], request["assessment"])
+    except Exception as exc:
+        print(f"[ShotCraft change response] Draft generation failed: {exc}")
+        return ClientUpdateDraft(message=f"Hi {inquiry.client_name}, thanks for your request. I’m reviewing how it affects the current shoot plan and will confirm the next steps with you shortly.")
+
+def _fallback_client_update(record: dict) -> ClientUpdateDraft:
+    payload = json.loads(record.get("payload") or "{}")
+    name = payload.get("client_name") or "there"
+    if record.get("status") == "SCHEDULED" and record.get("call_time"):
+        when = _parse_datetime(record["call_time"])
+        date_text = when.strftime("%A, %B %-d at %-I:%M %p") if when else record["call_time"]
+        location = record.get("meeting_location") or "the confirmed meeting point"
+        return ClientUpdateDraft(message=f"Hi {name}, your shoot is confirmed for {date_text} at {location}. Your production pack has the final creative direction and preparation details. Please message us if anything changes before shoot day.")
+    return ClientUpdateDraft(message=f"Hi {name}, your shoot plan has been updated. Please review the latest details in ShotCraft and message us with any questions.")
+
+@app.post("/api/inquiries/{inquiry_id}/client-update-draft", response_model=ClientUpdateDraft)
+def create_client_update_draft(inquiry_id: int) -> ClientUpdateDraft:
+    record = next((item for item in list_inquiries() if item["id"] == inquiry_id), None)
+    if not record:
+        raise HTTPException(status_code=404, detail="Inquiry not found.")
+    inquiry = Inquiry(**json.loads(record["payload"]))
+    try:
+        return draft_client_update(inquiry, record.get("status", ""), record.get("call_time"), record.get("meeting_location"))
+    except Exception as exc:
+        print(f"[ShotCraft client update] Draft generation failed: {exc}")
+        return _fallback_client_update(record)
+
+@app.post("/api/inquiries/{inquiry_id}/client-update-sent")
+def mark_client_update_sent(inquiry_id: int) -> dict:
+    if not next((item for item in list_inquiries() if item["id"] == inquiry_id), None):
+        raise HTTPException(status_code=404, detail="Inquiry not found.")
+    record_event(inquiry_id, "CLIENT_UPDATE_SENT")
+    return {"inquiry_id": inquiry_id, "sent": True}
 
 @app.post("/api/inquiries/{inquiry_id}/reply")
 def reply_to_inquiry(inquiry_id: int, reply: InquiryReply, background_tasks: BackgroundTasks) -> dict[str, object]:
@@ -427,6 +601,25 @@ def create_and_generate_moodboard_endpoint(request: MoodboardRequest) -> Moodboa
         save_moodboard(inquiry_id, result.model_dump())
     return result
 
+def _fallback_production_pack(inquiry: Inquiry, moodboard: dict | None = None) -> ProductionPack:
+    """Keep the workflow moving when the planning model is unavailable or malformed."""
+    message = inquiry.message or ""
+    city = next((name for name in ("Seattle", "New Delhi", "Delhi", "Bangalore") if name.lower() in message.lower()), None)
+    location = city or "Location to be confirmed with the client"
+    deliverables = f"{inquiry.deliverable_count} final edited images" if inquiry.deliverable_count else "Final edited images to be confirmed"
+    wardrobe = inquiry.wardrobe_details or "Client wardrobe to be confirmed"
+    title = f"{inquiry.client_name} · Shoot production pack"
+    return ProductionPack(
+        title=title,
+        location_plan=[f"Primary setting: {location}", "Confirm meeting point, access, and permissions before shoot day.", "Keep a nearby covered alternative available if conditions change."],
+        shot_list=["Establishing environmental portrait", "Three-quarter portrait", "Close portrait", "Natural movement frame", "Final detail and variation frames"],
+        lighting_plan=["Use available light appropriate to the confirmed setting.", "Check exposure and skin tone before the first set.", "Keep a simple reflector or shade option ready if practical."],
+        wardrobe_checklist=[wardrobe, "Bring a clean backup option and comfortable walking shoes.", "Confirm final wardrobe before shoot day."],
+        call_sheet={"client": inquiry.client_name, "email": inquiry.contact_email or inquiry.client_email, "date": inquiry.shoot_date or "To be confirmed", "duration": "To be confirmed", "budget": str(inquiry.budget) if inquiry.budget is not None else "To be confirmed", "deliverables": deliverables},
+        weather_note="Review local conditions before the shoot and reconfirm the plan if outdoor weather changes.",
+        backup_plan="Use a covered nearby setting or reschedule with the client if weather or access makes the planned shoot unsafe.",
+    )
+
 @app.post("/api/production-packs/create", response_model=ProductionPack)
 def create_production_pack(request: BriefRequest, inquiry_id: int | None = None) -> ProductionPack:
     """Create a practical shoot-day plan from the approved brief."""
@@ -438,7 +631,7 @@ def create_production_pack(request: BriefRequest, inquiry_id: int | None = None)
         pack = build_production_pack(b, moodboard)
     except Exception as exc:
         print(f"[ShotCraft production pack] Generation failed: {exc}")
-        raise HTTPException(status_code=502, detail="The shoot-specific production pack could not be generated. Please try again.") from exc
+        pack = _fallback_production_pack(b, moodboard)
 
     if b.shoot_date and "seattle" in b.message.lower():
         try:

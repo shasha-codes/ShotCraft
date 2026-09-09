@@ -30,7 +30,30 @@ def _ensure_schema(db: sqlite3.Connection) -> None:
         updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY(inquiry_id) REFERENCES inquiries(id) ON DELETE CASCADE
     )""")
+    db.execute("""CREATE TABLE IF NOT EXISTS inquiry_change_requests (
+        inquiry_id INTEGER PRIMARY KEY,
+        source_message TEXT NOT NULL,
+        assessment TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'PENDING',
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY(inquiry_id) REFERENCES inquiries(id) ON DELETE CASCADE
+    )""")
+    db.execute("""CREATE TABLE IF NOT EXISTS pre_shoot_checkins (
+        inquiry_id INTEGER PRIMARY KEY,
+        status TEXT NOT NULL,
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY(inquiry_id) REFERENCES inquiries(id) ON DELETE CASCADE
+    )""")
     db.execute("CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, name TEXT NOT NULL, email TEXT UNIQUE NOT NULL, password_hash TEXT NOT NULL, user_type TEXT NOT NULL, created_at TEXT DEFAULT CURRENT_TIMESTAMP)")
+    db.execute("""CREATE TABLE IF NOT EXISTS client_shoot_ideas (
+        client_email TEXT PRIMARY KEY,
+        history_signature TEXT NOT NULL,
+        ideas TEXT NOT NULL,
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )""")
     db.execute("""CREATE TABLE IF NOT EXISTS inquiry_events (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         inquiry_id INTEGER NOT NULL,
@@ -67,6 +90,76 @@ def record_event(inquiry_id: int, event_type: str, metadata: dict | None = None)
         _ensure_schema(db)
         _record_event(db, inquiry_id, event_type, metadata)
         db.commit()
+
+def inquiry_event_flags(inquiry_ids: list[int]) -> dict[int, set[str]]:
+    if not inquiry_ids:
+        return {}
+    placeholders = ",".join("?" for _ in inquiry_ids)
+    with sqlite3.connect(DB_PATH) as db:
+        _ensure_schema(db)
+        rows = db.execute(f"SELECT inquiry_id, event_type FROM inquiry_events WHERE inquiry_id IN ({placeholders})", inquiry_ids).fetchall()
+    flags: dict[int, set[str]] = {}
+    for inquiry_id, event_type in rows:
+        flags.setdefault(int(inquiry_id), set()).add(str(event_type))
+    return flags
+
+def save_change_request(inquiry_id: int, source_message: str, assessment: dict) -> None:
+    with sqlite3.connect(DB_PATH) as db:
+        _ensure_schema(db)
+        db.execute("""INSERT INTO inquiry_change_requests (inquiry_id, source_message, assessment, status)
+            VALUES (?, ?, ?, 'PENDING') ON CONFLICT(inquiry_id) DO UPDATE SET
+            source_message=excluded.source_message, assessment=excluded.assessment, status='PENDING', updated_at=CURRENT_TIMESTAMP""",
+            (inquiry_id, source_message, json.dumps(assessment)))
+        db.commit()
+
+def get_change_request(inquiry_id: int) -> dict | None:
+    with sqlite3.connect(DB_PATH) as db:
+        db.row_factory = sqlite3.Row
+        _ensure_schema(db)
+        row = db.execute("SELECT * FROM inquiry_change_requests WHERE inquiry_id=?", (inquiry_id,)).fetchone()
+    if not row: return None
+    result = dict(row)
+    result["assessment"] = json.loads(result["assessment"] or "{}")
+    return result
+
+def change_request_summaries(inquiry_ids: list[int]) -> dict[int, dict]:
+    if not inquiry_ids: return {}
+    placeholders = ",".join("?" for _ in inquiry_ids)
+    with sqlite3.connect(DB_PATH) as db:
+        db.row_factory = sqlite3.Row
+        _ensure_schema(db)
+        rows = db.execute(f"SELECT inquiry_id, assessment, status FROM inquiry_change_requests WHERE inquiry_id IN ({placeholders})", inquiry_ids).fetchall()
+    return {int(row["inquiry_id"]): {"status": row["status"], "assessment": json.loads(row["assessment"] or "{}") } for row in rows}
+
+def resolve_change_request(inquiry_id: int) -> None:
+    with sqlite3.connect(DB_PATH) as db:
+        _ensure_schema(db)
+        db.execute("UPDATE inquiry_change_requests SET status='APPROVED', updated_at=CURRENT_TIMESTAMP WHERE inquiry_id=?", (inquiry_id,))
+        _record_event(db, inquiry_id, "PLAN_UPDATED")
+        db.commit()
+
+def save_pre_shoot_checkin(inquiry_id: int, status: str) -> bool:
+    if status not in {"READY"}:
+        return False
+    with sqlite3.connect(DB_PATH) as db:
+        _ensure_schema(db)
+        exists = db.execute("SELECT 1 FROM inquiries WHERE id=?", (inquiry_id,)).fetchone()
+        if not exists:
+            return False
+        db.execute("""INSERT INTO pre_shoot_checkins (inquiry_id, status) VALUES (?, ?)
+            ON CONFLICT(inquiry_id) DO UPDATE SET status=excluded.status, updated_at=CURRENT_TIMESTAMP""", (inquiry_id, status))
+        db.commit()
+    return True
+
+def pre_shoot_checkin_summaries(inquiry_ids: list[int]) -> dict[int, dict]:
+    if not inquiry_ids:
+        return {}
+    placeholders = ",".join("?" for _ in inquiry_ids)
+    with sqlite3.connect(DB_PATH) as db:
+        db.row_factory = sqlite3.Row
+        _ensure_schema(db)
+        rows = db.execute(f"SELECT inquiry_id, status, updated_at FROM pre_shoot_checkins WHERE inquiry_id IN ({placeholders})", inquiry_ids).fetchall()
+    return {int(row["inquiry_id"]): {"status": row["status"], "updated_at": row["updated_at"]} for row in rows}
 
 def _backfill_events(db: sqlite3.Connection, inquiry_id: int, row: sqlite3.Row | tuple) -> None:
     """Populate milestones for legacy rows without inventing timestamps."""
@@ -122,6 +215,33 @@ def authenticate_user(email: str, password: str, user_type: str) -> dict | None:
     if not secrets.compare_digest(_hash_password(password,salt).split(":",1)[1],digest): return None
     return {"name":row[0],"email":row[1],"user_type":row[3]}
 
+
+def get_client_shoot_ideas(client_email: str, history_signature: str) -> list[dict] | None:
+    """Return a cached set only when it reflects the client's current history."""
+    with sqlite3.connect(DB_PATH) as db:
+        _ensure_schema(db)
+        row = db.execute(
+            "SELECT ideas FROM client_shoot_ideas WHERE client_email=? AND history_signature=?",
+            (client_email.lower(), history_signature),
+        ).fetchone()
+    if not row:
+        return None
+    try:
+        return json.loads(row[0])
+    except json.JSONDecodeError:
+        return None
+
+
+def save_client_shoot_ideas(client_email: str, history_signature: str, ideas: list[dict]) -> None:
+    with sqlite3.connect(DB_PATH) as db:
+        _ensure_schema(db)
+        db.execute("""INSERT INTO client_shoot_ideas (client_email, history_signature, ideas)
+            VALUES (?, ?, ?)
+            ON CONFLICT(client_email) DO UPDATE SET history_signature=excluded.history_signature,
+            ideas=excluded.ideas, updated_at=CURRENT_TIMESTAMP""",
+            (client_email.lower(), history_signature, json.dumps(ideas)))
+        db.commit()
+
 def save_inquiry(inquiry: Inquiry) -> int:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     with sqlite3.connect(DB_PATH) as db:
@@ -161,6 +281,14 @@ def save_production_pack(inquiry_id: int, pack: dict, draft: bool = False) -> No
         else:
             db.execute("UPDATE inquiries SET production_pack=?, updated_at=CURRENT_TIMESTAMP WHERE id=?", (json.dumps(pack), inquiry_id))
         db.commit()
+
+def update_meeting_location(inquiry_id: int, meeting_location: str) -> bool:
+    """Update the canonical shoot location after a photographer approves a specific change."""
+    with sqlite3.connect(DB_PATH) as db:
+        _ensure_schema(db)
+        cur = db.execute("UPDATE inquiries SET meeting_location=?, updated_at=CURRENT_TIMESTAMP WHERE id=?", (meeting_location.strip(), inquiry_id))
+        db.commit()
+        return cur.rowcount > 0
 
 def approve_production_pack(inquiry_id: int) -> bool:
     with sqlite3.connect(DB_PATH) as db:

@@ -43,11 +43,40 @@ class ScheduleSelection(BaseModel):
     ends_at: str = Field(min_length=1)
     location: str = Field(min_length=1)
 
+class ClientUpdateDraft(BaseModel):
+    message: str = Field(min_length=1, max_length=1200)
+
+class ChangeAssessment(BaseModel):
+    request_summary: str = Field(min_length=1, max_length=500)
+    impacts: list[str] = Field(default_factory=list)
+    proposed_updates: dict[str, list[str]] = Field(default_factory=dict)
+    decision: str = Field(default="FOLLOW_UP", pattern="^(APPLY|FOLLOW_UP|REVIEW)$")
+    decision_reason: str = Field(default="", max_length=500)
+    missing_information: list[str] = Field(default_factory=list)
+    confirmed_meeting_location: str | None = Field(default=None, max_length=500)
+
+class ChangeApproval(BaseModel):
+    client_message: str = Field(min_length=1, max_length=1200)
+
 class InquiryAnalysis(BaseModel):
     status: str
     summary: str
+    # A short display name lets the workspace describe a shoot without replaying
+    # the client's raw inquiry (or their follow-up transcript) as a heading.
+    concept_name: str = Field(default="", max_length=80)
     missing_information: list[str] = Field(default_factory=list)
     questions: list[str] = Field(default_factory=list)
+
+
+class ShootIdea(BaseModel):
+    """A low-commitment creative prompt a client can turn into an inquiry."""
+    title: str = Field(min_length=3, max_length=80)
+    description: str = Field(min_length=12, max_length=220)
+    prompt: str = Field(min_length=12, max_length=600)
+
+
+class ShootIdeaRecommendations(BaseModel):
+    ideas: list[ShootIdea] = Field(min_length=2, max_length=3)
 
 
 class BriefRequest(BaseModel):
