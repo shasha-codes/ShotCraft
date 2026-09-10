@@ -24,9 +24,11 @@
         <div class="intro"><p class="eyebrow">Your creative workspace</p><h2 id="heading">Welcome back.</h2><p id="sub">Sign in to continue planning remarkable shoots.</p></div>
         <form id="form">
           <div class="field" id="nameField"><label for="name">Your name</label><input id="name" autocomplete="name" placeholder="How should we address you?"></div>
+          <div class="field profile-field" id="cityField"><label for="city">Your city</label><input id="city" autocomplete="address-level2" placeholder="e.g. Seattle, WA"></div>
           <div class="field"><label for="email">Email address</label><input id="email" type="email" required autocomplete="email" placeholder="you@example.com"></div>
           <div class="field"><div class="label-row"><label for="password">Password</label><span id="passwordHint">At least 8 characters</span></div><input id="password" type="password" required minlength="8" autocomplete="current-password" placeholder="Enter your password"></div>
           <fieldset id="roleField"><legend>Choose your workspace</legend><div class="roles"><label class="role"><input type="radio" name="role" value="client" checked><span class="role-icon">◎</span><span><b>Plan a shoot</b><small>I’m a client sharing my vision</small></span><i>✓</i></label><label class="role"><input type="radio" name="role" value="photographer"><span class="role-icon">◇</span><span><b>Manage my studio</b><small>I’m a photographer producing shoots</small></span><i>✓</i></label></div></fieldset>
+          <div class="profile-field photographer-profile" id="photographerProfile"><div class="field"><label for="specialties">Photography specialties</label><input id="specialties" placeholder="e.g. portraits, editorial, weddings"></div><div class="field"><label for="bio">Short studio bio <span>optional</span></label><textarea id="bio" maxlength="500" placeholder="Tell clients what you love to photograph."></textarea></div></div>
           <button class="submit" id="submit">Sign in <span>→</span></button>
           <div id="status" role="status" aria-live="polite"></div>
         </form>

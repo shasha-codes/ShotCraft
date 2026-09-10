@@ -5,7 +5,7 @@ from dotenv import load_dotenv
 from strands import Agent
 from strands.models.openai import OpenAIModel
 from .models import BriefRequest, ChangeAssessment, ClientUpdateDraft, CreativeBrief, Inquiry, InquiryAnalysis, Moodboard, MoodboardRequest, ProductionPack, ScheduleSuggestion, ShootIdeaRecommendations
-from .prompts import BRIEF_PROMPT, CHANGE_CLIENT_UPDATE_PROMPT, CHANGE_REQUEST_PROMPT, CLIENT_UPDATE_PROMPT, MOODBOARD_PROMPT, PRODUCTION_PROMPT, SCHEDULING_PROMPT, SHOOT_IDEAS_PROMPT, SYSTEM_PROMPT
+from .prompts import BRIEF_PROMPT, CHANGE_CLIENT_UPDATE_PROMPT, CHANGE_REQUEST_PROMPT, MOODBOARD_PROMPT, PRODUCTION_PROMPT, SCHEDULING_PROMPT, SHOOT_IDEAS_PROMPT, SYSTEM_PROMPT
 
 # Local development uses the AWS profile and region recorded in .env. The call is
 # harmless in deployed environments where those variables are already provided.
@@ -83,10 +83,6 @@ def build_production_pack(inquiry: Inquiry, moodboard: dict | None = None) -> Pr
 def recommend_schedule_slots(inquiry: Inquiry, busy_times: list[dict]) -> list[ScheduleSuggestion]:
     result = json.loads(_json(_complete(SCHEDULING_PROMPT, f"Inquiry:\n{inquiry.model_dump_json(indent=2)}\nBusy times:\n{json.dumps(busy_times, indent=2)}", PLANNING_MODEL_ID)))
     return [ScheduleSuggestion.model_validate(item) for item in result["suggestions"]]
-
-def draft_client_update(inquiry: Inquiry, status: str, call_time: str | None, meeting_location: str | None) -> ClientUpdateDraft:
-    context = {"inquiry": inquiry.model_dump(), "status": status, "call_time": call_time, "meeting_location": meeting_location}
-    return ClientUpdateDraft.model_validate_json(_json(_complete(CLIENT_UPDATE_PROMPT, f"Draft a client update from:\n{json.dumps(context, indent=2)}", PLANNING_MODEL_ID)))
 
 def assess_change_request(inquiry: Inquiry, production_pack: dict, client_message: str) -> ChangeAssessment:
     context = {"inquiry": inquiry.model_dump(), "production_pack": production_pack, "client_message": client_message}
