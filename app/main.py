@@ -1,16 +1,24 @@
 """FastAPI entry point for ShotCraft."""
 
-from fastapi import BackgroundTasks, FastAPI, HTTPException
-from fastapi.responses import FileResponse, RedirectResponse
-from .storage import add_inquiry_message, append_reply, change_request_summaries, confirm_schedule_request, get_change_request, get_schedule_request, get_client_shoot_ideas, inquiry_event_flags, inquiry_timeline, list_inquiries, list_inquiry_messages, message_summaries, pre_shoot_checkin_summaries, record_event, resolve_change_request, save_change_request, save_client_shoot_ideas, save_inquiry, save_pre_shoot_checkin, save_schedule_suggestions, scheduled_times, select_schedule_suggestion, unread_message_counts, update_analysis, update_meeting_location, create_user, authenticate_user, save_moodboard, save_production_pack, approve_production_pack, set_client_decision, schedule_inquiry
+from fastapi import BackgroundTasks, FastAPI, HTTPException, Request, Response
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
+from dotenv import load_dotenv
+
+# Load local development secrets before importing modules that configure model clients.
+# Production values still come from the systemd EnvironmentFile on EC2.
+load_dotenv()
+
+from .storage import add_inquiry_message, append_reply, change_request_summaries, confirm_client_schedule_selection, confirm_schedule_request, create_auth_session, get_change_request, get_schedule_request, get_client_shoot_ideas, get_inquiry, get_session_user, inquiry_timeline, list_inquiries, list_inquiry_messages, list_photographers, message_summaries, pre_shoot_checkin_summaries, record_event, resolve_change_request, revoke_auth_session, save_change_request, save_client_shoot_ideas, save_inquiry, save_pre_shoot_checkin, save_schedule_suggestions, scheduled_times, select_schedule_suggestion, unread_message_counts, update_analysis, update_meeting_location, update_user_profile, create_user, authenticate_user, save_creative_brief, save_moodboard, save_production_pack, approve_production_pack, set_client_decision, schedule_inquiry
 from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 import json
 import hashlib
+import re
 from datetime import datetime, timedelta
 from urllib.parse import urlencode
 from urllib.request import urlopen
 
-from .agent import analyze_inquiry, assess_change_request, build_production_pack, create_creative_brief, create_moodboard, draft_change_client_update, draft_client_update, recommend_next_shoot_ideas, recommend_schedule_slots
+from .agent import analyze_inquiry, assess_change_request, build_production_pack, create_creative_brief, create_moodboard, draft_change_client_update, recommend_next_shoot_ideas, recommend_schedule_slots
 from .images import generate_moodboard_images
 from .models import (
     BriefRequest,
@@ -27,8 +35,10 @@ from .models import (
     ClientDecision,
     ScheduleRequest,
     ScheduleSelection,
+    ScheduleProposal,
     InquiryMessageCreate,
     ClientUpdateDraft,
+    ProfileUpdate,
     ChangeApproval,
     ChangeAssessment,
     ShootIdeaRecommendations,
@@ -37,28 +47,125 @@ from .models import (
 app = FastAPI(title="ShotCraft API", version="0.1.0")
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
+@app.get("/favicon.ico", include_in_schema=False)
+def favicon():
+    return FileResponse("static/brand/shotcraft-mark.png", media_type="image/png")
+
+SESSION_COOKIE = "shotcraft_session"
+SESSION_MAX_AGE = 14 * 24 * 60 * 60
+PUBLIC_API_PATHS = {"/api/auth/login", "/api/auth/signup", "/api/auth/me", "/api/auth/logout", "/api/photographers"}
+
+def _session_cookie_is_secure(request: Request) -> bool:
+    """Use Secure cookies automatically once TLS terminates at the app or proxy."""
+    return request.url.scheme == "https" or request.headers.get("x-forwarded-proto", "").split(",")[0].strip() == "https"
+
+def _set_session_cookie(response: Response, request: Request, token: str) -> None:
+    response.set_cookie(
+        key=SESSION_COOKIE, value=token, max_age=SESSION_MAX_AGE, httponly=True,
+        secure=_session_cookie_is_secure(request), samesite="lax", path="/",
+    )
+
+def _current_user(request: Request) -> dict | None:
+    return get_session_user(request.cookies.get(SESSION_COOKIE))
+
+def _can_access_inquiry(user: dict, inquiry_id: int) -> bool:
+    record = get_inquiry(inquiry_id)
+    if not record:
+        return True  # Let the endpoint return its normal 404 response.
+    if user["user_type"] == "client":
+        return record.get("client_email", "").lower() == user["email"].lower()
+    try:
+        assigned = json.loads(record.get("payload") or "{}").get("photographer_email", "")
+    except json.JSONDecodeError:
+        assigned = ""
+    return bool(assigned) and assigned.lower() == user["email"].lower()
+
+@app.middleware("http")
+async def require_session_for_api(request: Request, call_next):
+    if request.url.path.startswith("/api/") and request.url.path not in PUBLIC_API_PATHS and request.method != "OPTIONS":
+        user = _current_user(request)
+        if not user:
+            return JSONResponse(status_code=401, content={"detail": "Sign in to continue."})
+        request.state.user = user
+        match = re.fullmatch(r"/api/inquiries/(\d+)(?:/.*)?", request.url.path)
+        if match and not _can_access_inquiry(user, int(match.group(1))):
+            return JSONResponse(status_code=403, content={"detail": "You do not have access to this inquiry."})
+    return await call_next(request)
+
+
+@app.get("/healthz")
+def healthz() -> dict[str, str]:
+    """Minimal unauthenticated health check for the EC2 service and reverse proxy."""
+    return {"status": "ok"}
+
 
 @app.get("/")
 def health_check() -> FileResponse:
     return FileResponse("static/index.html")
 
 @app.get("/auth")
-def auth_page() -> FileResponse:
+def auth_page(request: Request):
+    user = _current_user(request)
+    if user:
+        return RedirectResponse("/photographer" if user["user_type"] == "photographer" else "/client", status_code=303)
     return FileResponse("static/auth.html")
 
 @app.post("/api/auth/signup")
-def signup(request: AuthRequest) -> dict:
-    if not request.name or len(request.password) < 8: return {"error": "Name and a password of at least 8 characters are required."}
-    user = create_user(request.name, request.email, request.password, request.user_type)
-    return user or {"error": "Email already exists or user type is invalid."}
+def signup(payload: AuthRequest, request: Request, response: Response) -> dict:
+    if not payload.name or len(payload.password) < 8:
+        raise HTTPException(status_code=422, detail="Name and a password of at least 8 characters are required.")
+    user = create_user(payload.name, payload.email, payload.password, payload.user_type, payload.city, payload.bio, payload.specialties)
+    if not user:
+        raise HTTPException(status_code=409, detail="An account with that email already exists, or the account type is invalid.")
+    authenticated = authenticate_user(payload.email, payload.password, payload.user_type or "")
+    if not authenticated:
+        raise HTTPException(status_code=500, detail="Could not start a session. Please sign in.")
+    _set_session_cookie(response, request, create_auth_session(authenticated["id"]))
+    return {key: authenticated[key] for key in ("name", "email", "user_type", "city", "bio", "specialties", "profile_image")}
 
 @app.post("/api/auth/login")
-def login(request: AuthRequest) -> dict:
-    return authenticate_user(request.email, request.password, request.user_type or "") or {"error": "Invalid email or password."}
+def login(payload: AuthRequest, request: Request, response: Response) -> dict:
+    user = authenticate_user(payload.email, payload.password, payload.user_type or "")
+    if not user:
+        raise HTTPException(status_code=401, detail="Invalid email or password.")
+    _set_session_cookie(response, request, create_auth_session(user["id"]))
+    return {key: user[key] for key in ("name", "email", "user_type", "city", "bio", "specialties", "profile_image")}
+
+@app.get("/api/auth/me")
+def current_session(request: Request) -> dict:
+    user = _current_user(request)
+    if not user:
+        raise HTTPException(status_code=401, detail="Sign in to continue.")
+    return {key: user[key] for key in ("name", "email", "user_type", "city", "bio", "specialties", "profile_image")}
+
+@app.post("/api/auth/logout", status_code=204)
+def logout(request: Request, response: Response) -> Response:
+    revoke_auth_session(request.cookies.get(SESSION_COOKIE))
+    response.delete_cookie(SESSION_COOKIE, path="/")
+    return response
+
+@app.put("/api/auth/profile")
+def update_profile(payload: ProfileUpdate, request: Request) -> dict:
+    user = request.state.user
+    if payload.profile_image and not re.fullmatch(r"data:image/(?:png|jpeg|jpg|webp);base64,[A-Za-z0-9+/=]+", payload.profile_image):
+        raise HTTPException(status_code=422, detail="Profile pictures must be PNG, JPEG, or WebP images.")
+    updated = update_user_profile(user["id"], payload.city, payload.bio, payload.specialties if user["user_type"] == "photographer" else None, payload.profile_image)
+    if not updated:
+        raise HTTPException(status_code=404, detail="Profile not found.")
+    return {key: updated[key] for key in ("name", "email", "user_type", "city", "bio", "specialties", "profile_image")}
+
+
+@app.get("/api/photographers")
+def get_photographers(search: str = "", city: str = "") -> list[dict[str, str | None]]:
+    """A small client-facing directory of registered photographer workspaces."""
+    return list_photographers(search, city)
 
 
 @app.get("/client")
-def client_inquiry_page() -> FileResponse:
+def client_inquiry_page(request: Request):
+    user = _current_user(request)
+    if not user or user["user_type"] != "client":
+        return RedirectResponse("/auth?mode=login", status_code=303)
     return FileResponse("static/client.html")
 
 @app.get("/client/follow-up")
@@ -81,7 +188,10 @@ def client_plan_page(id: int | None = None) -> RedirectResponse:
     return RedirectResponse(f"/client?view=plan{suffix}", status_code=303)
 
 @app.get("/photographer")
-def photographer_dashboard() -> FileResponse:
+def photographer_dashboard(request: Request):
+    user = _current_user(request)
+    if not user or user["user_type"] != "photographer":
+        return RedirectResponse("/auth?mode=login", status_code=303)
     return FileResponse("static/photographer.html")
 
 @app.get("/photographer/inquiries")
@@ -130,23 +240,59 @@ def process_inquiry(inquiry_id: int, inquiry: Inquiry) -> None:
         if inquiry.deliverable_count is None and "final_image_count" not in result.missing_information:
             result.missing_information.append("final_image_count")
             result.questions.append("How many final edited photos would you like delivered?")
-        status = "NEEDS_INFORMATION" if result.missing_information else "READY_FOR_REVIEW"
+        status = "NEEDS_INFORMATION" if result.missing_information else "DRAFTING_PLAN"
         update_analysis(inquiry_id, status, result.model_dump())
         if not result.missing_information:
+            # The structured intake supplied the same information that the
+            # legacy follow-up step collected, so keep the short journey linear.
+            record_event(inquiry_id, "FOLLOWUP_SUBMITTED", {"source": "structured_intake"})
             record_event(inquiry_id, "QUESTIONS_ANSWERED")
+            # Prepare one complete, editable plan for the photographer. A plan is
+            # not considered drafted until the visual references have rendered.
+            try:
+                brief = create_creative_brief(BriefRequest(inquiry=inquiry, inquiry_id=inquiry_id))
+                save_creative_brief(inquiry_id, brief.model_dump())
+                moodboard = create_moodboard(MoodboardRequest(brief=brief, inquiry_id=inquiry_id))
+                generated = generate_moodboard_images(moodboard)
+                save_moodboard(inquiry_id, {"moodboard": moodboard.model_dump(), "generated": generated.model_dump()})
+                try:
+                    pack = build_production_pack(inquiry, {"moodboard": moodboard.model_dump()})
+                except Exception as exc:
+                    print(f"[ShotCraft draft production pack] Generation failed: {exc}")
+                    pack = _fallback_production_pack(inquiry, {"moodboard": moodboard.model_dump()})
+                save_production_pack(inquiry_id, pack.model_dump(), draft=True)
+                record_event(inquiry_id, "DRAFT_PLAN_READY")
+                update_analysis(inquiry_id, "READY_FOR_REVIEW", result.model_dump())
+            except Exception as exc:
+                # Keep the request available to the photographer, but never mark
+                # the production plan as drafted without its image references.
+                update_analysis(inquiry_id, "READY_FOR_REVIEW", result.model_dump())
+                print(f"[ShotCraft draft plan] Generation failed for inquiry {inquiry_id}: {exc}")
         print(f"[ShotCraft notification] Inquiry {inquiry_id}: {status}")
     except Exception as exc:
         update_analysis(inquiry_id, "PROCESSING_ERROR", {"error": str(exc)})
         print(f"[ShotCraft notification] Inquiry {inquiry_id} failed: {exc}")
 
 @app.post("/api/inquiries")
-def submit_inquiry(inquiry: Inquiry, background_tasks: BackgroundTasks) -> dict[str, object]:
+def submit_inquiry(inquiry: Inquiry, background_tasks: BackgroundTasks, request: Request) -> dict[str, object]:
+    user = request.state.user
+    if user["user_type"] != "client":
+        raise HTTPException(status_code=403, detail="Only client accounts can create inquiries.")
+    # Identity comes from the authenticated session, never from browser input.
+    inquiry.client_name = user["name"]
+    inquiry.client_email = user["email"]
+    inquiry.contact_email = user["email"]
     inquiry_id = save_inquiry(inquiry)
     background_tasks.add_task(process_inquiry, inquiry_id, inquiry)
     return {"id": inquiry_id, "status": "NEW", "message": "Inquiry received."}
 
 @app.get("/api/inquiries")
-def get_inquiries(client_email: str | None = None, photographer_email: str | None = None) -> list[dict]:
+def get_inquiries(request: Request, client_email: str | None = None, photographer_email: str | None = None) -> list[dict]:
+    user = request.state.user
+    if user["user_type"] == "client":
+        client_email, photographer_email = user["email"], None
+    else:
+        client_email, photographer_email = None, user["email"]
     inquiries = list_inquiries()
     if client_email:
         inquiries = [item for item in inquiries if item.get("client_email", "").lower() == client_email.lower()]
@@ -166,11 +312,9 @@ def get_inquiries(client_email: str | None = None, photographer_email: str | Non
         for item in inquiries:
             item["unread_messages"] = counts.get(int(item["id"]), 0)
             item.update(summaries.get(int(item["id"]), {"message_count": 0, "latest_message": None}))
-    flags = inquiry_event_flags([int(item["id"]) for item in inquiries])
     changes = change_request_summaries([int(item["id"]) for item in inquiries])
     checkins = pre_shoot_checkin_summaries([int(item["id"]) for item in inquiries])
     for item in inquiries:
-        item["client_update_sent"] = "CLIENT_UPDATE_SENT" in flags.get(int(item["id"]), set())
         item["change_request"] = changes.get(int(item["id"]))
         item["pre_shoot_checkin"] = checkins.get(int(item["id"]))
     return inquiries
@@ -334,35 +478,6 @@ def create_change_client_update_draft(inquiry_id: int) -> ClientUpdateDraft:
         print(f"[ShotCraft change response] Draft generation failed: {exc}")
         return ClientUpdateDraft(message=f"Hi {inquiry.client_name}, thanks for your request. I’m reviewing how it affects the current shoot plan and will confirm the next steps with you shortly.")
 
-def _fallback_client_update(record: dict) -> ClientUpdateDraft:
-    payload = json.loads(record.get("payload") or "{}")
-    name = payload.get("client_name") or "there"
-    if record.get("status") == "SCHEDULED" and record.get("call_time"):
-        when = _parse_datetime(record["call_time"])
-        date_text = when.strftime("%A, %B %-d at %-I:%M %p") if when else record["call_time"]
-        location = record.get("meeting_location") or "the confirmed meeting point"
-        return ClientUpdateDraft(message=f"Hi {name}, your shoot is confirmed for {date_text} at {location}. Your production pack has the final creative direction and preparation details. Please message us if anything changes before shoot day.")
-    return ClientUpdateDraft(message=f"Hi {name}, your shoot plan has been updated. Please review the latest details in ShotCraft and message us with any questions.")
-
-@app.post("/api/inquiries/{inquiry_id}/client-update-draft", response_model=ClientUpdateDraft)
-def create_client_update_draft(inquiry_id: int) -> ClientUpdateDraft:
-    record = next((item for item in list_inquiries() if item["id"] == inquiry_id), None)
-    if not record:
-        raise HTTPException(status_code=404, detail="Inquiry not found.")
-    inquiry = Inquiry(**json.loads(record["payload"]))
-    try:
-        return draft_client_update(inquiry, record.get("status", ""), record.get("call_time"), record.get("meeting_location"))
-    except Exception as exc:
-        print(f"[ShotCraft client update] Draft generation failed: {exc}")
-        return _fallback_client_update(record)
-
-@app.post("/api/inquiries/{inquiry_id}/client-update-sent")
-def mark_client_update_sent(inquiry_id: int) -> dict:
-    if not next((item for item in list_inquiries() if item["id"] == inquiry_id), None):
-        raise HTTPException(status_code=404, detail="Inquiry not found.")
-    record_event(inquiry_id, "CLIENT_UPDATE_SENT")
-    return {"inquiry_id": inquiry_id, "sent": True}
-
 @app.post("/api/inquiries/{inquiry_id}/reply")
 def reply_to_inquiry(inquiry_id: int, reply: InquiryReply, background_tasks: BackgroundTasks) -> dict[str, object]:
     inquiry = append_reply(inquiry_id, reply.answers)
@@ -457,10 +572,8 @@ def _valid_suggestions(suggestions: list[dict], busy: list[dict], preferred_date
     return valid[:3]
 
 @app.get("/api/calendar")
-def get_calendar(client_email: str | None = None, photographer_email: str | None = None) -> dict:
-    if not client_email and not photographer_email:
-        raise HTTPException(status_code=422, detail="client_email or photographer_email is required.")
-    records = get_inquiries(client_email=client_email, photographer_email=photographer_email)
+def get_calendar(request: Request, client_email: str | None = None, photographer_email: str | None = None) -> dict:
+    records = get_inquiries(request, client_email=client_email, photographer_email=photographer_email)
     entries = []
     for record in records:
         request = get_schedule_request(int(record["id"]))
@@ -475,14 +588,26 @@ def get_schedule_recommendations(inquiry_id: int) -> dict:
     record = next((item for item in list_inquiries() if item["id"] == inquiry_id), None)
     if not record: raise HTTPException(status_code=404, detail="Inquiry not found.")
     request = get_schedule_request(inquiry_id)
-    if request and request.get("status") == "PENDING_CLIENT":
-        preferred = _parse_datetime(json.loads(record.get("payload") or "{}").get("shoot_date", ""))
-        expected_location = _inquiry_schedule_location(record)
-        suggestions = request.get("suggestions") or []
-        if preferred and any((_parse_datetime(item.get("starts_at")) or datetime.min).date() != preferred.date() for item in suggestions):
-            request = None
-        elif any(item.get("location") != expected_location for item in suggestions):
-            request = None
+    # Complete selections saved by the prior hand-off flow. New selections are
+    # confirmed in the selection endpoint itself; this only upgrades existing
+    # PENDING_PHOTOGRAPHER records once after the workflow change.
+    if request and request.get("status") == "PENDING_PHOTOGRAPHER" and request.get("selected_starts_at"):
+        if confirm_client_schedule_selection(
+            inquiry_id,
+            request["selected_starts_at"],
+            request.get("selected_ends_at") or request["selected_starts_at"],
+            request.get("selected_location") or "Location to be confirmed",
+        ):
+            add_inquiry_message(
+                inquiry_id,
+                "photographer",
+                "ShotCraft scheduling",
+                f"Your shoot is confirmed for {request['selected_starts_at'].replace('T', ' ')} at {request.get('selected_location') or 'the agreed location'}. We’re looking forward to it!",
+            )
+            request = get_schedule_request(inquiry_id)
+    # A photographer may intentionally offer alternatives outside the client's
+    # preferred date or at a different venue. Those saved options are the
+    # source of truth and must be shown to the client unchanged.
     return request or {"inquiry_id": inquiry_id, "status": None, "suggestions": []}
 
 @app.post("/api/inquiries/{inquiry_id}/schedule-recommendations")
@@ -507,14 +632,60 @@ def create_schedule_recommendations(inquiry_id: int) -> dict:
         raise HTTPException(status_code=409, detail="No conflict-free times are available yet. Please contact the photographer.")
     return save_schedule_suggestions(inquiry_id, photographer_email, suggestions[:3])
 
+
+@app.post("/api/inquiries/{inquiry_id}/schedule-proposals")
+def propose_schedule_times(inquiry_id: int, proposal: ScheduleProposal, photographer_email: str) -> dict:
+    """Save photographer-authored booking options for a client to choose from."""
+    record = next((item for item in list_inquiries() if item["id"] == inquiry_id), None)
+    if not record:
+        raise HTTPException(status_code=404, detail="Inquiry not found.")
+    inquiry = Inquiry(**json.loads(record["payload"]))
+    if not record.get("production_approved") or record.get("status") in {"CLIENT_CHANGE_REQUESTED", "SCHEDULED"}:
+        raise HTTPException(status_code=409, detail="Share an active production plan before proposing times.")
+    if not inquiry.photographer_email or inquiry.photographer_email.lower() != photographer_email.lower():
+        raise HTTPException(status_code=403, detail="Only the assigned photographer can propose times for this shoot.")
+
+    busy = [item for item in scheduled_times(photographer_email) if int(item.get("inquiry_id", -1)) != inquiry_id]
+    suggestions: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+    for slot in proposal.suggestions:
+        start, end = _parse_datetime(slot.starts_at), _parse_datetime(slot.ends_at)
+        if not start or not end or end <= start:
+            raise HTTPException(status_code=422, detail="Each proposed time needs a valid start and end.")
+        if end - start > timedelta(days=1):
+            raise HTTPException(status_code=422, detail="A proposed shoot can be up to one day long.")
+        key = (start.isoformat(timespec="minutes"), end.isoformat(timespec="minutes"))
+        if key in seen:
+            raise HTTPException(status_code=422, detail="Proposed times must be distinct.")
+        if _slots_overlap(start, end, busy):
+            raise HTTPException(status_code=409, detail="One of these times conflicts with a confirmed or client-selected shoot.")
+        seen.add(key)
+        suggestions.append({
+            "starts_at": key[0],
+            "ends_at": key[1],
+            "location": slot.location,
+            "rationale": slot.rationale or "Proposed by your photographer.",
+        })
+    return save_schedule_suggestions(inquiry_id, photographer_email, suggestions)
+
 @app.post("/api/inquiries/{inquiry_id}/schedule-selection")
 def select_schedule_time(inquiry_id: int, selection: ScheduleSelection) -> dict:
     request = get_schedule_request(inquiry_id)
     if not request: raise HTTPException(status_code=409, detail="Get recommended times before making a selection.")
     matches = any(item["starts_at"] == selection.starts_at and item["ends_at"] == selection.ends_at for item in request["suggestions"])
     if not matches: raise HTTPException(status_code=422, detail="Please select one of the recommended times.")
-    if not select_schedule_suggestion(inquiry_id, selection.starts_at, selection.ends_at, selection.location):
+    busy = [item for item in scheduled_times(request["photographer_email"]) if int(item.get("inquiry_id", -1)) != inquiry_id]
+    start, end = _parse_datetime(selection.starts_at), _parse_datetime(selection.ends_at)
+    if not start or not end or _slots_overlap(start, end, busy):
+        raise HTTPException(status_code=409, detail="This time is no longer available. Please choose another option.")
+    if not confirm_client_schedule_selection(inquiry_id, selection.starts_at, selection.ends_at, selection.location):
         raise HTTPException(status_code=409, detail="This time is no longer available for selection.")
+    add_inquiry_message(
+        inquiry_id,
+        "photographer",
+        "ShotCraft scheduling",
+        f"Your shoot is confirmed for {selection.starts_at.replace('T', ' ')} at {selection.location}. We’re looking forward to it!",
+    )
     return get_schedule_request(inquiry_id) or {}
 
 @app.post("/api/inquiries/{inquiry_id}/schedule-confirmation")
@@ -564,6 +735,29 @@ def generate_moodboard_endpoint(moodboard: Moodboard) -> GeneratedMoodboard:
     return generate_moodboard_images(moodboard)
 
 
+@app.post("/api/inquiries/{inquiry_id}/moodboard/render", response_model=GeneratedMoodboard)
+def render_saved_moodboard(inquiry_id: int) -> GeneratedMoodboard:
+    """Render image references only when the photographer explicitly requests them."""
+    record = get_inquiry(inquiry_id)
+    if not record:
+        raise HTTPException(status_code=404, detail="Inquiry not found.")
+    saved = json.loads(record.get("moodboard") or "{}")
+    plan = saved.get("moodboard") or saved
+    if not plan or not plan.get("tiles"):
+        raise HTTPException(status_code=409, detail="Create a moodboard plan before rendering images.")
+    try:
+        moodboard = Moodboard.model_validate(plan)
+        generated = generate_moodboard_images(moodboard)
+    except Exception as exc:
+        print(f"[ShotCraft moodboard] Render failed: {exc}")
+        raise HTTPException(
+            status_code=502,
+            detail="The image provider could not render this moodboard. Check the server logs and try again.",
+        ) from exc
+    save_moodboard(inquiry_id, {"moodboard": moodboard.model_dump(), "generated": generated.model_dump()})
+    return generated
+
+
 @app.post("/api/moodboards/create-and-generate", response_model=MoodboardResult)
 def create_and_generate_moodboard_endpoint(request: MoodboardRequest) -> MoodboardResult:
     """Create the AI moodboard plan and render its tiles in one demo-friendly call."""
@@ -580,10 +774,14 @@ def create_and_generate_moodboard_endpoint(request: MoodboardRequest) -> Moodboa
         moodboard = create_moodboard(request)
         generated = generate_moodboard_images(moodboard)
     except Exception as exc:
-        print(f"[ShotCraft moodboard] Generation failed: {exc}")
         root = exc
         while getattr(root, "__cause__", None):
             root = root.__cause__
+        # Keep the browser response safe, but preserve the provider's actionable
+        # status in the server log for deployment troubleshooting.
+        print(f"[ShotCraft moodboard] Generation failed: {exc}")
+        if root is not exc:
+            print(f"[ShotCraft moodboard] Provider error: {type(root).__name__}: {root}")
         message = str(root).lower()
         if "moderation" in message or "safety system" in message:
             detail = "The image provider rejected this visual prompt for safety. Try again to generate a safer variation."
@@ -643,5 +841,9 @@ def create_production_pack(request: BriefRequest, inquiry_id: int | None = None)
         except Exception:
             pass
     if target_inquiry_id:
-        save_production_pack(target_inquiry_id, pack.model_dump())
+        # A manually regenerated pack follows the same visible journey: it is a
+        # draft only once it includes rendered moodboard references.
+        save_production_pack(target_inquiry_id, pack.model_dump(), draft=True)
+        if isinstance(moodboard, dict) and (moodboard.get("generated") or {}).get("tiles"):
+            record_event(target_inquiry_id, "DRAFT_PLAN_READY")
     return pack

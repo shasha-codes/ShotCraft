@@ -16,6 +16,10 @@ class Inquiry(BaseModel):
     subject_count: int | None = Field(default=None, ge=1, le=10)
     wardrobe_details: str | None = None
     deliverable_count: int | None = Field(default=None, ge=1, le=100)
+    duration_minutes: int | None = Field(default=None, ge=30, le=1440)
+    availability_windows: list[str] = Field(default_factory=list, min_length=1, max_length=3)
+    location: str | None = Field(default=None, max_length=300)
+    style_direction: str | None = Field(default=None, max_length=500)
 
 class InquiryReply(BaseModel):
     answers: str = Field(min_length=1)
@@ -42,6 +46,10 @@ class ScheduleSelection(BaseModel):
     starts_at: str = Field(min_length=1)
     ends_at: str = Field(min_length=1)
     location: str = Field(min_length=1)
+
+
+class ScheduleProposal(BaseModel):
+    suggestions: list[ScheduleSuggestion] = Field(min_length=1, max_length=5)
 
 class ClientUpdateDraft(BaseModel):
     message: str = Field(min_length=1, max_length=1200)
@@ -149,3 +157,13 @@ class AuthRequest(BaseModel):
     email: str
     password: str
     user_type: str | None = None
+    city: str | None = Field(default=None, max_length=120)
+    bio: str | None = Field(default=None, max_length=500)
+    specialties: str | None = Field(default=None, max_length=300)
+
+class ProfileUpdate(BaseModel):
+    name: str | None = None
+    city: str | None = Field(default=None, max_length=120)
+    bio: str | None = Field(default=None, max_length=500)
+    specialties: str | None = Field(default=None, max_length=300)
+    profile_image: str | None = Field(default=None, max_length=2_800_000)

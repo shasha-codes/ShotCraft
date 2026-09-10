@@ -161,14 +161,6 @@ never claim a time is confirmed. Return ONLY valid JSON:
 {"suggestions":[{"starts_at":"YYYY-MM-DDTHH:MM","ends_at":"YYYY-MM-DDTHH:MM","location":"suggested or supplied location","rationale":"short reason"}]}
 """.strip()
 
-CLIENT_UPDATE_PROMPT = """
-You are ShotCraft's client communications assistant. Draft one warm, concise,
-client-facing update about their photography inquiry. Use only the supplied facts.
-Never invent a date, time, location, deliverable, or commitment. Mention the confirmed
-schedule only when it is provided. Do not use a subject line, sign-off, markdown, or
-more than 90 words. Return ONLY valid JSON: {"message":"..."}
-""".strip()
-
 CHANGE_REQUEST_PROMPT = """
 You are ShotCraft's production-change assistant. Assess a client's requested change
 to an existing photography shoot. Use only the inquiry, existing production pack,

@@ -4,6 +4,7 @@ import sqlite3
 import hashlib
 import secrets
 from pathlib import Path
+from datetime import datetime, timedelta, timezone
 from .models import Inquiry
 
 DB_PATH = Path(__file__).resolve().parent.parent / "data" / "shotcraft.db"
@@ -18,6 +19,7 @@ def _ensure_schema(db: sqlite3.Connection) -> None:
     if "production_approved" not in columns: db.execute("ALTER TABLE inquiries ADD COLUMN production_approved INTEGER DEFAULT 0")
     if "call_time" not in columns: db.execute("ALTER TABLE inquiries ADD COLUMN call_time TEXT")
     if "meeting_location" not in columns: db.execute("ALTER TABLE inquiries ADD COLUMN meeting_location TEXT")
+    if "creative_brief" not in columns: db.execute("ALTER TABLE inquiries ADD COLUMN creative_brief TEXT")
     db.execute("""CREATE TABLE IF NOT EXISTS schedule_requests (
         inquiry_id INTEGER PRIMARY KEY,
         photographer_email TEXT NOT NULL,
@@ -46,7 +48,22 @@ def _ensure_schema(db: sqlite3.Connection) -> None:
         updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY(inquiry_id) REFERENCES inquiries(id) ON DELETE CASCADE
     )""")
-    db.execute("CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, name TEXT NOT NULL, email TEXT UNIQUE NOT NULL, password_hash TEXT NOT NULL, user_type TEXT NOT NULL, created_at TEXT DEFAULT CURRENT_TIMESTAMP)")
+    db.execute("CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, name TEXT NOT NULL, email TEXT UNIQUE NOT NULL, password_hash TEXT NOT NULL, user_type TEXT NOT NULL, city TEXT, bio TEXT, specialties TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP)")
+    user_columns = {row[1] for row in db.execute("PRAGMA table_info(users)")}
+    if "city" not in user_columns: db.execute("ALTER TABLE users ADD COLUMN city TEXT")
+    if "bio" not in user_columns: db.execute("ALTER TABLE users ADD COLUMN bio TEXT")
+    if "specialties" not in user_columns: db.execute("ALTER TABLE users ADD COLUMN specialties TEXT")
+    if "profile_image" not in user_columns: db.execute("ALTER TABLE users ADD COLUMN profile_image TEXT")
+    db.execute("""CREATE TABLE IF NOT EXISTS auth_sessions (
+        token_hash TEXT PRIMARY KEY,
+        user_id INTEGER NOT NULL,
+        expires_at TEXT NOT NULL,
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        last_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+    )""")
+    db.execute("CREATE INDEX IF NOT EXISTS idx_auth_sessions_user_id ON auth_sessions(user_id)")
+    db.execute("CREATE INDEX IF NOT EXISTS idx_auth_sessions_expires_at ON auth_sessions(expires_at)")
     db.execute("""CREATE TABLE IF NOT EXISTS client_shoot_ideas (
         client_email TEXT PRIMARY KEY,
         history_signature TEXT NOT NULL,
@@ -167,8 +184,8 @@ def _backfill_events(db: sqlite3.Connection, inquiry_id: int, row: sqlite3.Row |
     _record_event(db, inquiry_id, "INQUIRY_RECEIVED")
     analysis = json.loads(values.get("analysis") or "{}")
     payload = json.loads(values.get("payload") or "{}")
-    if values.get("moodboard"):
-        _record_event(db, inquiry_id, "MOODBOARD_READY")
+    if values.get("production_pack"):
+        _record_event(db, inquiry_id, "DRAFT_PLAN_READY")
     if values.get("production_approved"):
         _record_event(db, inquiry_id, "PRODUCTION_PLAN_SHARED")
     if values.get("status") in {"CLIENT_CONFIRMED", "SCHEDULED"}:
@@ -179,10 +196,9 @@ def _backfill_events(db: sqlite3.Connection, inquiry_id: int, row: sqlite3.Row |
 def inquiry_timeline(inquiry_id: int) -> list[dict]:
     milestones = [
         ("INQUIRY_RECEIVED", "Inquiry received"), ("FOLLOWUP_SUBMITTED", "Follow-up submitted"),
-        ("QUESTIONS_ANSWERED", "Questions answered"),
-        ("BRIEF_APPROVED", "Creative brief approved"), ("MOODBOARD_READY", "Moodboard ready"),
-        ("PRODUCTION_PLAN_SHARED", "Production plan shared"), ("SHOOT_CONFIRMED", "Shoot confirmed"),
-        ("SHOOT_SCHEDULED", "Scheduled"),
+        ("DRAFT_PLAN_READY", "Production plan drafted"),
+        ("PRODUCTION_PLAN_SHARED", "Production plan shared"),
+        ("SHOOT_SCHEDULED", "Shoot scheduled"),
     ]
     with sqlite3.connect(DB_PATH) as db:
         db.row_factory = sqlite3.Row
@@ -195,25 +211,111 @@ def inquiry_timeline(inquiry_id: int) -> list[dict]:
     events = {row["event_type"]: row for row in rows}
     return [{"type": event_type, "label": label, "completed": event_type in events, "timestamp": events[event_type]["created_at"] if event_type in events else None, "metadata": json.loads(events[event_type]["metadata"] or "{}") if event_type in events else {}} for event_type, label in milestones]
 
-def _hash_password(password: str, salt: str | None = None) -> str:
-    salt = salt or secrets.token_hex(16)
-    return salt + ":" + hashlib.pbkdf2_hmac("sha256", password.encode(), salt.encode(), 120000).hex()
+def _hash_password(password: str, salt: bytes | None = None) -> str:
+    """Use scrypt for new passwords; legacy PBKDF2 hashes are upgraded on login."""
+    salt = salt or secrets.token_bytes(16)
+    digest = hashlib.scrypt(password.encode(), salt=salt, n=2**14, r=8, p=1, maxmem=64 * 1024 * 1024)
+    return "scrypt$16384$8$1$" + salt.hex() + "$" + digest.hex()
 
-def create_user(name: str, email: str, password: str, user_type: str) -> dict | None:
+def _verify_password(password: str, stored: str) -> tuple[bool, bool]:
+    """Return (valid, needs_upgrade), including support for the prior PBKDF2 format."""
+    if stored.startswith("scrypt$"):
+        try:
+            _, n, r, p, salt_hex, digest_hex = stored.split("$", 5)
+            digest = hashlib.scrypt(password.encode(), salt=bytes.fromhex(salt_hex), n=int(n), r=int(r), p=int(p), maxmem=64 * 1024 * 1024)
+            return secrets.compare_digest(digest.hex(), digest_hex), False
+        except (TypeError, ValueError):
+            return False, False
+    try:
+        salt, digest_hex = stored.split(":", 1)
+        digest = hashlib.pbkdf2_hmac("sha256", password.encode(), salt.encode(), 120000).hex()
+        return secrets.compare_digest(digest, digest_hex), True
+    except ValueError:
+        return False, False
+
+def create_user(name: str, email: str, password: str, user_type: str, city: str | None = None, bio: str | None = None, specialties: str | None = None) -> dict | None:
     if user_type not in {"client", "photographer"}: return None
     with sqlite3.connect(DB_PATH) as db:
         _ensure_schema(db)
-        try: db.execute("INSERT INTO users (name,email,password_hash,user_type) VALUES (?,?,?,?)", (name,email.lower(),_hash_password(password),user_type)); db.commit()
+        try: db.execute("INSERT INTO users (name,email,password_hash,user_type,city,bio,specialties) VALUES (?,?,?,?,?,?,?)", (name,email.lower(),_hash_password(password),user_type,(city or '').strip() or None,(bio or '').strip() or None,(specialties or '').strip() or None)); db.commit()
         except sqlite3.IntegrityError: return None
-    return {"name":name,"email":email.lower(),"user_type":user_type}
+    return {"name":name,"email":email.lower(),"user_type":user_type,"city":(city or '').strip() or None,"bio":(bio or '').strip() or None,"specialties":(specialties or '').strip() or None}
 
 def authenticate_user(email: str, password: str, user_type: str) -> dict | None:
     with sqlite3.connect(DB_PATH) as db:
-        _ensure_schema(db); row=db.execute("SELECT name,email,password_hash,user_type FROM users WHERE email=?", (email.lower(),)).fetchone()
+        _ensure_schema(db); row=db.execute("SELECT id,name,email,password_hash,user_type,city,bio,specialties,profile_image FROM users WHERE email=?", (email.lower(),)).fetchone()
     if not row: return None
-    salt, digest=row[2].split(":",1)
-    if not secrets.compare_digest(_hash_password(password,salt).split(":",1)[1],digest): return None
-    return {"name":row[0],"email":row[1],"user_type":row[3]}
+    if user_type and row[4] != user_type: return None
+    valid, needs_upgrade = _verify_password(password, row[3])
+    if not valid: return None
+    if needs_upgrade:
+        with sqlite3.connect(DB_PATH) as db:
+            _ensure_schema(db)
+            db.execute("UPDATE users SET password_hash=? WHERE id=?", (_hash_password(password), row[0]))
+            db.commit()
+    return {"id": row[0], "name":row[1],"email":row[2],"user_type":row[4],"city":row[5],"bio":row[6],"specialties":row[7],"profile_image":row[8]}
+
+def create_auth_session(user_id: int, lifetime_days: int = 14) -> str:
+    token = secrets.token_urlsafe(32)
+    token_hash = hashlib.sha256(token.encode()).hexdigest()
+    expires_at = (datetime.now(timezone.utc) + timedelta(days=lifetime_days)).isoformat()
+    with sqlite3.connect(DB_PATH) as db:
+        _ensure_schema(db)
+        db.execute("DELETE FROM auth_sessions WHERE expires_at < ?", (datetime.now(timezone.utc).isoformat(),))
+        db.execute("INSERT INTO auth_sessions (token_hash, user_id, expires_at) VALUES (?, ?, ?)", (token_hash, user_id, expires_at))
+        db.commit()
+    return token
+
+def get_session_user(token: str | None) -> dict | None:
+    if not token:
+        return None
+    token_hash = hashlib.sha256(token.encode()).hexdigest()
+    now = datetime.now(timezone.utc).isoformat()
+    with sqlite3.connect(DB_PATH) as db:
+        db.row_factory = sqlite3.Row
+        _ensure_schema(db)
+        db.execute("DELETE FROM auth_sessions WHERE expires_at < ?", (now,))
+        row = db.execute("""SELECT users.id, users.name, users.email, users.user_type, users.city, users.bio, users.specialties, users.profile_image
+            FROM auth_sessions JOIN users ON users.id=auth_sessions.user_id
+            WHERE auth_sessions.token_hash=? AND auth_sessions.expires_at >= ?""", (token_hash, now)).fetchone()
+        if row:
+            db.execute("UPDATE auth_sessions SET last_seen_at=CURRENT_TIMESTAMP WHERE token_hash=?", (token_hash,))
+        db.commit()
+    return dict(row) if row else None
+
+def update_user_profile(user_id: int, city: str | None, bio: str | None, specialties: str | None, profile_image: str | None) -> dict | None:
+    with sqlite3.connect(DB_PATH) as db:
+        _ensure_schema(db)
+        db.execute("UPDATE users SET city=?, bio=?, specialties=?, profile_image=? WHERE id=?", ((city or '').strip() or None, (bio or '').strip() or None, (specialties or '').strip() or None, profile_image, user_id))
+        db.commit()
+        db.row_factory = sqlite3.Row
+        row = db.execute("SELECT id,name,email,user_type,city,bio,specialties,profile_image FROM users WHERE id=?", (user_id,)).fetchone()
+    return dict(row) if row else None
+
+def revoke_auth_session(token: str | None) -> None:
+    if not token:
+        return
+    with sqlite3.connect(DB_PATH) as db:
+        _ensure_schema(db)
+        db.execute("DELETE FROM auth_sessions WHERE token_hash=?", (hashlib.sha256(token.encode()).hexdigest(),))
+        db.commit()
+
+
+def list_photographers(search: str = "", city: str = "") -> list[dict[str, str | None]]:
+    """Return the public directory used when a client chooses a photographer."""
+    with sqlite3.connect(DB_PATH) as db:
+        _ensure_schema(db)
+        where = ["user_type='photographer'"]
+        values: list[str] = []
+        if search.strip():
+            where.append("(lower(name) LIKE ? OR lower(city) LIKE ? OR lower(specialties) LIKE ?)")
+            term = f"%{search.strip().lower()}%"
+            values.extend([term, term, term])
+        if city.strip():
+            where.append("lower(city) LIKE ?")
+            values.append(f"%{city.strip().lower()}%")
+        rows = db.execute(f"SELECT name, email, city, bio, specialties FROM users WHERE {' AND '.join(where)} ORDER BY lower(name), lower(email)", values).fetchall()
+    return [{"name": str(row[0]), "email": str(row[1]), "city": row[2], "bio": row[3], "specialties": row[4]} for row in rows]
 
 
 def get_client_shoot_ideas(client_email: str, history_signature: str) -> list[dict] | None:
@@ -269,7 +371,16 @@ def save_moodboard(inquiry_id: int, result: dict) -> None:
     with sqlite3.connect(DB_PATH) as db:
         _ensure_schema(db)
         db.execute("UPDATE inquiries SET moodboard=?, updated_at=CURRENT_TIMESTAMP WHERE id=?", (json.dumps(result), inquiry_id))
-        _record_event(db, inquiry_id, "MOODBOARD_READY")
+        generated = result.get("generated") or {}
+        has_rendered_tiles = bool(generated.get("tiles")) if isinstance(generated, dict) else False
+        _record_event(db, inquiry_id, "MOODBOARD_RENDERED" if has_rendered_tiles else "MOODBOARD_PLAN_READY")
+        db.commit()
+
+def save_creative_brief(inquiry_id: int, brief: dict) -> None:
+    with sqlite3.connect(DB_PATH) as db:
+        _ensure_schema(db)
+        db.execute("UPDATE inquiries SET creative_brief=?, updated_at=CURRENT_TIMESTAMP WHERE id=?", (json.dumps(brief), inquiry_id))
+        _record_event(db, inquiry_id, "BRIEF_READY")
         db.commit()
 
 def save_production_pack(inquiry_id: int, pack: dict, draft: bool = False) -> None:
@@ -346,6 +457,7 @@ def save_schedule_suggestions(inquiry_id: int, photographer_email: str, suggesti
               suggestions=excluded.suggestions, selected_starts_at=NULL, selected_ends_at=NULL,
               selected_location=NULL, status='PENDING_CLIENT', updated_at=CURRENT_TIMESTAMP""",
             (inquiry_id, photographer_email.lower(), json.dumps(suggestions)))
+        _record_event(db, inquiry_id, "TIME_OPTIONS_PROPOSED", {"count": len(suggestions)})
         db.commit()
     return get_schedule_request(inquiry_id) or {}
 
@@ -365,8 +477,36 @@ def select_schedule_suggestion(inquiry_id: int, starts_at: str, ends_at: str, lo
         cur = db.execute("""UPDATE schedule_requests SET selected_starts_at=?, selected_ends_at=?,
             selected_location=?, status='PENDING_PHOTOGRAPHER', updated_at=CURRENT_TIMESTAMP
             WHERE inquiry_id=? AND status='PENDING_CLIENT'""", (starts_at, ends_at, location, inquiry_id))
+        if cur.rowcount:
+            _record_event(db, inquiry_id, "CLIENT_SELECTED_TIME", {"starts_at": starts_at, "ends_at": ends_at, "location": location})
         db.commit()
         return cur.rowcount > 0
+
+
+def confirm_client_schedule_selection(inquiry_id: int, starts_at: str, ends_at: str, location: str) -> bool:
+    """Atomically turn the client's saved choice into the confirmed booking."""
+    with sqlite3.connect(DB_PATH) as db:
+        _ensure_schema(db)
+        selected = db.execute(
+            """UPDATE schedule_requests SET selected_starts_at=?, selected_ends_at=?,
+               selected_location=?, status='CONFIRMED', updated_at=CURRENT_TIMESTAMP
+               WHERE inquiry_id=? AND status IN ('PENDING_CLIENT', 'PENDING_PHOTOGRAPHER')""",
+            (starts_at, ends_at, location, inquiry_id),
+        )
+        if not selected.rowcount:
+            db.rollback()
+            return False
+        booked = db.execute(
+            """UPDATE inquiries SET status='SCHEDULED', call_time=?, meeting_location=?, updated_at=CURRENT_TIMESTAMP
+               WHERE id=? AND status='CLIENT_CONFIRMED'""",
+            (starts_at, location, inquiry_id),
+        )
+        if not booked.rowcount:
+            db.rollback()
+            return False
+        _record_event(db, inquiry_id, "SHOOT_SCHEDULED", {"call_time": starts_at, "ends_at": ends_at, "meeting_location": location})
+        db.commit()
+        return True
 
 def confirm_schedule_request(inquiry_id: int, photographer_email: str, call_time: str, meeting_location: str) -> bool:
     with sqlite3.connect(DB_PATH) as db:

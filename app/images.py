@@ -91,7 +91,7 @@ def generate_moodboard_images(moodboard: Moodboard) -> GeneratedMoodboard:
                 else:
                     prompts.append(attempt_prompt)
         if result is None or not result.data or not result.data[0].b64_json:
-            raise RuntimeError(f"Could not generate the '{tile.title}' reference after two attempts.") from last_error
+            raise RuntimeError(f"Could not generate the '{tile.title}' reference after three attempts.") from last_error
         image_data = base64.b64decode(result.data[0].b64_json)
         filename = f"{uuid.uuid4().hex}.jpg"
         (OUTPUT_DIR / filename).write_bytes(image_data)
