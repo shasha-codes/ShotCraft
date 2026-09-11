@@ -54,7 +54,7 @@ AWS_BEARER_TOKEN_BEDROCK=replace_with_your_bedrock_api_key
 SHOTCRAFT_MODEL=openai.gpt-oss-120b-1:0
 SHOTCRAFT_BEDROCK_ENDPOINT=https://bedrock-mantle.us-west-2.api.aws/v1
 OPENAI_API_KEY=replace_with_your_openai_key
-SHOTCRAFT_IMAGE_MODEL=gpt-image-1.5
+SHOTCRAFT_IMAGE_MODEL=gpt-image-2.5-flare
 PORTRAITPILOT_MOCK_TOOLS=false
 ```
 

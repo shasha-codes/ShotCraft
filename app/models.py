@@ -17,7 +17,7 @@ class Inquiry(BaseModel):
     wardrobe_details: str | None = None
     deliverable_count: int | None = Field(default=None, ge=1, le=100)
     duration_minutes: int | None = Field(default=None, ge=30, le=1440)
-    availability_windows: list[str] = Field(default_factory=list, min_length=1, max_length=3)
+    availability_windows: list[str] = Field(default_factory=list, min_length=1, max_length=6)
     location: str | None = Field(default=None, max_length=300)
     style_direction: str | None = Field(default=None, max_length=500)
 

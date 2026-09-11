@@ -4,6 +4,7 @@ import base64
 import os
 import re
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from openai import OpenAI
@@ -11,7 +12,8 @@ from openai import OpenAI
 from .models import Moodboard, GeneratedMoodboard, GeneratedTile
 
 
-MODEL_ID = os.getenv("SHOTCRAFT_IMAGE_MODEL", "gpt-image-1.5")
+MODEL_ID = os.getenv("SHOTCRAFT_IMAGE_MODEL", "gpt-image-2.5-flare")
+MAX_CONCURRENT_RENDERS = max(1, min(int(os.getenv("SHOTCRAFT_IMAGE_CONCURRENCY", "4")), 4))
 OUTPUT_DIR = Path(__file__).resolve().parent.parent / "static" / "generated"
 
 
@@ -34,66 +36,71 @@ def _safe_editorial_prompt(role: str, subject: str, tile_prompt: str) -> str:
     )
 
 
-def generate_moodboard_images(moodboard: Moodboard) -> GeneratedMoodboard:
-    """Render low-cost square moodboard tiles with OpenAI image generation."""
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    client = OpenAI()
-    generated: list[GeneratedTile] = []
+def _moodboard_subject(moodboard: Moodboard) -> str:
     all_text = " ".join([moodboard.title, moodboard.creative_direction] + [t.visual_prompt for t in moodboard.tiles]).lower()
     if re.search(r"\b(no person|product|location only)\b", all_text):
-        subject = "no person: an environment or product only"
+        return "no person: an environment or product only"
     elif re.search(r"\b(group|multiple people|two people|three people)\b", all_text):
-        subject = "the exact client-requested group; do not add or remove people"
+        return "the exact client-requested group; do not add or remove people"
     elif re.search(r"\b(male|man|men|boy|masculine)\b", all_text):
-        subject = "exactly one adult male subject"
+        return "exactly one adult male subject"
     elif re.search(r"\b(female|woman|women|girl|feminine)\b", all_text):
-        subject = "exactly one adult female subject"
+        return "exactly one adult female subject"
     elif re.search(r"\b(non-binary|nonbinary)\b", all_text):
-        subject = "exactly one adult non-binary subject"
-    else:
-        subject = "the exact client-requested subject, with no gender or identity changes"
+        return "exactly one adult non-binary subject"
+    return "the exact client-requested subject, with no gender or identity changes"
 
-    for tile in moodboard.tiles:
-        title = tile.title.lower()
-        if "location" in title or "background" in title:
-            role = "Environmental location photography only: show the requested setting with no people, models, mannequins, or portraits. Make Seattle unmistakable with recognizable local architecture or skyline cues."
-        elif "lighting" in title:
-            role = "Show exactly one model in a head-and-shoulders portrait; demonstrate the requested light on the face. Keep the entire head, hair, and both shoulders inside the frame."
-        elif "wardrobe" in title or "pose" in title:
-            role = "Show exactly one model in a true head-to-toe full-body fashion pose wearing only the specified wardrobe. Pull the camera back far enough to include the entire head, hair, both arms, legs, and both feet with comfortable margins. Do not crop any part of the subject. Do not add coats, jackets, hats, bags, jewelry, or accessories unless explicitly requested."
-        else:
-            role = "Show exactly one model in a strong editorial hero portrait wearing the specified wardrobe. Keep the entire head and hair inside the frame with comfortable space above it."
-        prompt = (
+def _render_tile(tile, subject: str) -> GeneratedTile:
+    title = tile.title.lower()
+    if "location" in title or "background" in title:
+        role = "Environmental location photography only: show the requested setting with no people, models, mannequins, or portraits. Make Seattle unmistakable with recognizable local architecture or skyline cues."
+    elif "lighting" in title:
+        role = "Show exactly one model in a head-and-shoulders portrait; demonstrate the requested light on the face. Keep the entire head, hair, and both shoulders inside the frame."
+    elif "wardrobe" in title or "pose" in title:
+        role = "Show exactly one model in a true head-to-toe full-body fashion pose wearing only the specified wardrobe. Pull the camera back far enough to include the entire head, hair, both arms, legs, and both feet with comfortable margins. Do not crop any part of the subject. Do not add coats, jackets, hats, bags, jewelry, or accessories unless explicitly requested."
+    else:
+        role = "Show exactly one model in a strong editorial hero portrait wearing the specified wardrobe. Keep the entire head and hair inside the frame with comfortable space above it."
+    prompt = (
             f"{role} HARD SUBJECT LOCK: {subject}. Preserve the same presentation, person count, age, hair, "
             "skin tone, exact wardrobe, city, and indoor/outdoor setting. Never add an unrequested outer layer. Natural believable photography, "
             "realistic fabric and skin texture, intentional composition, cinematic color grade, subtle film grain. "
             "No text, logos, watermark, collage, split screen, duplicate people, groups, CGI, illustration, "
             "cartoon, or alternate clothing. Client brief and tile direction: " + tile.visual_prompt
             + " FINAL HARD CONSTRAINT: use only the client-specified clothing; no jacket, coat, bag, jewelry, hat, or added accessory. Keep generous headroom above the hair and never crop the head."
-        )
-        last_error: Exception | None = None
-        result = None
-        prompts = [prompt]
-        for attempt in range(3):
-            attempt_prompt = prompts[-1]
-            try:
-                result = client.images.generate(model=MODEL_ID, prompt=attempt_prompt, size="1024x1024", quality="low", output_format="jpeg")
-                if not result.data or not result.data[0].b64_json:
-                    raise RuntimeError("The image provider returned no image data.")
+    )
+    client = OpenAI()
+    last_error: Exception | None = None
+    # One normal attempt, then one conservative variation only when moderation
+    # rejects the prompt. Retrying ordinary provider failures adds long waits.
+    for attempt_prompt in (prompt, _safe_editorial_prompt(role, subject, tile.visual_prompt)):
+        try:
+            result = client.images.generate(model=MODEL_ID, prompt=attempt_prompt, size="1024x1024", quality="low", output_format="jpeg")
+            if not result.data or not result.data[0].b64_json:
+                raise RuntimeError("The image provider returned no image data.")
+            image_data = base64.b64decode(result.data[0].b64_json)
+            filename = f"{uuid.uuid4().hex}.jpg"
+            (OUTPUT_DIR / filename).write_bytes(image_data)
+            return GeneratedTile(title=tile.title, image_url=f"/static/generated/{filename}")
+        except Exception as exc:
+            last_error = exc
+            if not _was_moderation_blocked(exc):
                 break
-            except Exception as exc:
-                last_error = exc
-                if _was_moderation_blocked(exc):
-                    # Retrying an identical moderated prompt cannot improve the result.
-                    # Use a deliberately conservative prompt for subsequent attempts.
-                    safe_prompt = _safe_editorial_prompt(role, subject, tile.visual_prompt)
-                    prompts.append(safe_prompt + f" Safe variation {attempt + 1}.")
-                else:
-                    prompts.append(attempt_prompt)
-        if result is None or not result.data or not result.data[0].b64_json:
-            raise RuntimeError(f"Could not generate the '{tile.title}' reference after three attempts.") from last_error
-        image_data = base64.b64decode(result.data[0].b64_json)
-        filename = f"{uuid.uuid4().hex}.jpg"
-        (OUTPUT_DIR / filename).write_bytes(image_data)
-        generated.append(GeneratedTile(title=tile.title, image_url=f"/static/generated/{filename}"))
-    return GeneratedMoodboard(title=moodboard.title, model_id=MODEL_ID, tiles=generated)
+    raise RuntimeError(f"Could not generate the '{tile.title}' reference after two attempts.") from last_error
+
+
+def generate_moodboard_images(moodboard: Moodboard, on_tile=None) -> GeneratedMoodboard:
+    """Render moodboard tiles concurrently, retaining their planned display order."""
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    tiles = moodboard.tiles
+    if not tiles:
+        return GeneratedMoodboard(title=moodboard.title, model_id=MODEL_ID, tiles=[])
+    subject = _moodboard_subject(moodboard)
+    rendered: dict[int, GeneratedTile] = {}
+    with ThreadPoolExecutor(max_workers=min(MAX_CONCURRENT_RENDERS, len(tiles))) as pool:
+        futures = {pool.submit(_render_tile, tile, subject): index for index, tile in enumerate(tiles)}
+        for future in as_completed(futures):
+            index = futures[future]
+            rendered[index] = future.result()
+            if on_tile:
+                on_tile(index, rendered[index])
+    return GeneratedMoodboard(title=moodboard.title, model_id=MODEL_ID, tiles=[rendered[index] for index in range(len(tiles))])
