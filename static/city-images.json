@@ -1,4 +1,629 @@
 {
-  "seattle": {"gallery":["https://images.unsplash.com/photo-1506146332389-18140dc7b2fb?auto=format&fit=crop&w=1200&q=85","https://images.unsplash.com/photo-1739932215593-775977975e10?auto=format&fit=crop&w=1200&q=85","https://images.unsplash.com/photo-1739932215472-15ebf0ab6cf4?auto=format&fit=crop&w=1200&q=85","https://images.unsplash.com/photo-1741017698867-bd73776b484c?auto=format&fit=crop&w=1200&q=85","https://images.unsplash.com/photo-1737868896748-27c241026c5d?auto=format&fit=crop&w=1200&q=85"],"credit":"Licensed city imagery"},
-  "delhi": {"gallery":["https://images.unsplash.com/photo-1587474260584-136574528ed5?auto=format&fit=crop&w=1200&q=85","https://images.unsplash.com/photo-1599661046289-e31897846e41?auto=format&fit=crop&w=1200&q=85","https://images.unsplash.com/photo-1564507592333-c60657eea523?auto=format&fit=crop&w=1200&q=85","https://images.unsplash.com/photo-1548013146-72479768bada?auto=format&fit=crop&w=1200&q=85","https://images.unsplash.com/photo-1524492412937-b28074a5d7da?auto=format&fit=crop&w=1200&q=85"],"credit":"Licensed city imagery"}
+  "new-york": {
+    "label": "New York, NY",
+    "aliases": [
+      "new york",
+      "nyc",
+      "manhattan"
+    ],
+    "gallery": [
+      "https://images.pexels.com/photos/8569166/pexels-photo-8569166.jpeg?auto=compress&cs=tinysrgb&fit=crop&h=627&w=1200",
+      "https://images.pexels.com/photos/12327112/pexels-photo-12327112.jpeg?auto=compress&cs=tinysrgb&fit=crop&h=627&w=1200",
+      "https://images.pexels.com/photos/1461370/pexels-photo-1461370.jpeg?auto=compress&cs=tinysrgb&fit=crop&h=627&w=1200"
+    ],
+    "attribution": [
+      {
+        "photographer": "Ivana Rodriguez",
+        "photographer_url": "https://www.pexels.com/@ivana-rodriguez-53736",
+        "photo_url": "https://www.pexels.com/photo/silhouette-of-city-buildings-during-sunset-8569166/",
+        "provider": "Pexels"
+      },
+      {
+        "photographer": "Malcolm Hill",
+        "photographer_url": "https://www.pexels.com/@malcolmhill",
+        "photo_url": "https://www.pexels.com/photo/city-skyline-12327112/",
+        "provider": "Pexels"
+      },
+      {
+        "photographer": "Vlad Alexandru Popa",
+        "photographer_url": "https://www.pexels.com/@vladalex94",
+        "photo_url": "https://www.pexels.com/photo/commercial-buildings-1461370/",
+        "provider": "Pexels"
+      }
+    ]
+  },
+  "los-angeles": {
+    "label": "Los Angeles, CA",
+    "aliases": [
+      "los angeles",
+      "la"
+    ],
+    "gallery": [
+      "https://images.pexels.com/photos/35291216/pexels-photo-35291216.jpeg?auto=compress&cs=tinysrgb&fit=crop&h=627&w=1200",
+      "https://images.pexels.com/photos/35291221/pexels-photo-35291221.jpeg?auto=compress&cs=tinysrgb&fit=crop&h=627&w=1200",
+      "https://images.pexels.com/photos/11677347/pexels-photo-11677347.jpeg?auto=compress&cs=tinysrgb&fit=crop&h=627&w=1200"
+    ],
+    "attribution": [
+      {
+        "photographer": "Stephen Leonardi",
+        "photographer_url": "https://www.pexels.com/@stephen-leonardi-587681991",
+        "photo_url": "https://www.pexels.com/photo/stunning-night-cityscape-of-downtown-los-angeles-35291216/",
+        "provider": "Pexels"
+      },
+      {
+        "photographer": "Stephen Leonardi",
+        "photographer_url": "https://www.pexels.com/@stephen-leonardi-587681991",
+        "photo_url": "https://www.pexels.com/photo/vibrant-los-angeles-cityscape-at-night-35291221/",
+        "provider": "Pexels"
+      },
+      {
+        "photographer": "Daniel Narinian",
+        "photographer_url": "https://www.pexels.com/@daniel-narinian-191282363",
+        "photo_url": "https://www.pexels.com/photo/city-with-high-rise-buildings-during-night-time-11677347/",
+        "provider": "Pexels"
+      }
+    ]
+  },
+  "chicago": {
+    "label": "Chicago, IL",
+    "aliases": [
+      "chicago"
+    ],
+    "gallery": [
+      "https://images.pexels.com/photos/26821665/pexels-photo-26821665.jpeg?auto=compress&cs=tinysrgb&fit=crop&h=627&w=1200",
+      "https://images.pexels.com/photos/25811914/pexels-photo-25811914.jpeg?auto=compress&cs=tinysrgb&fit=crop&h=627&w=1200",
+      "https://images.pexels.com/photos/2155985/pexels-photo-2155985.jpeg?auto=compress&cs=tinysrgb&fit=crop&h=627&w=1200"
+    ],
+    "attribution": [
+      {
+        "photographer": "K",
+        "photographer_url": "https://www.pexels.com/@kelly",
+        "photo_url": "https://www.pexels.com/photo/chicago-skyline-26821665/",
+        "provider": "Pexels"
+      },
+      {
+        "photographer": "K",
+        "photographer_url": "https://www.pexels.com/@kelly",
+        "photo_url": "https://www.pexels.com/photo/skyscrapers-on-michigan-lake-lakeshore-in-chicago-25811914/",
+        "provider": "Pexels"
+      },
+      {
+        "photographer": "Bhargava Marripati",
+        "photographer_url": "https://www.pexels.com/@bhargava-marripati-674798",
+        "photo_url": "https://www.pexels.com/photo/city-buildings-during-nighttime-2155985/",
+        "provider": "Pexels"
+      }
+    ]
+  },
+  "houston": {
+    "label": "Houston, TX",
+    "aliases": [
+      "houston"
+    ],
+    "gallery": [
+      "https://images.pexels.com/photos/15353653/pexels-photo-15353653.jpeg?auto=compress&cs=tinysrgb&fit=crop&h=627&w=1200",
+      "https://images.pexels.com/photos/18441165/pexels-photo-18441165.jpeg?auto=compress&cs=tinysrgb&fit=crop&h=627&w=1200",
+      "https://images.pexels.com/photos/17995530/pexels-photo-17995530.jpeg?auto=compress&cs=tinysrgb&fit=crop&h=627&w=1200"
+    ],
+    "attribution": [
+      {
+        "photographer": "juan mendez",
+        "photographer_url": "https://www.pexels.com/@jmendezrf",
+        "photo_url": "https://www.pexels.com/photo/aerial-view-of-downtown-houston-texas-at-night-15353653/",
+        "provider": "Pexels"
+      },
+      {
+        "photographer": "Erik Mclean",
+        "photographer_url": "https://www.pexels.com/@introspectivedsgn",
+        "photo_url": "https://www.pexels.com/photo/illuminated-skyscrapers-and-roads-in-city-downtown-at-night-18441165/",
+        "provider": "Pexels"
+      },
+      {
+        "photographer": "Jeswin  Thomas",
+        "photographer_url": "https://www.pexels.com/@jeswin",
+        "photo_url": "https://www.pexels.com/photo/downtown-at-night-17995530/",
+        "provider": "Pexels"
+      }
+    ]
+  },
+  "phoenix": {
+    "label": "Phoenix, AZ",
+    "aliases": [
+      "phoenix"
+    ],
+    "gallery": [
+      "https://images.pexels.com/photos/32371656/pexels-photo-32371656.jpeg?auto=compress&cs=tinysrgb&fit=crop&h=627&w=1200",
+      "https://images.pexels.com/photos/32371655/pexels-photo-32371655.jpeg?auto=compress&cs=tinysrgb&fit=crop&h=627&w=1200",
+      "https://images.pexels.com/photos/36181792/pexels-photo-36181792.jpeg?auto=compress&cs=tinysrgb&fit=crop&h=627&w=1200"
+    ],
+    "attribution": [
+      {
+        "photographer": "Nicole Seidl",
+        "photographer_url": "https://www.pexels.com/@nicole-seidl",
+        "photo_url": "https://www.pexels.com/photo/scenic-phoenix-desert-landscape-at-sunset-32371656/",
+        "provider": "Pexels"
+      },
+      {
+        "photographer": "Nicole Seidl",
+        "photographer_url": "https://www.pexels.com/@nicole-seidl",
+        "photo_url": "https://www.pexels.com/photo/sunset-over-phoenix-arizona-desert-landscape-32371655/",
+        "provider": "Pexels"
+      },
+      {
+        "photographer": "Roy Serafin",
+        "photographer_url": "https://www.pexels.com/@roythephotographer",
+        "photo_url": "https://www.pexels.com/photo/modern-skyscrapers-in-phoenix-at-sunset-36181792/",
+        "provider": "Pexels"
+      }
+    ]
+  },
+  "philadelphia": {
+    "label": "Philadelphia, PA",
+    "aliases": [
+      "philadelphia",
+      "philly"
+    ],
+    "gallery": [
+      "https://images.pexels.com/photos/37143616/pexels-photo-37143616.jpeg?auto=compress&cs=tinysrgb&fit=crop&h=627&w=1200",
+      "https://images.pexels.com/photos/4642419/pexels-photo-4642419.jpeg?auto=compress&cs=tinysrgb&fit=crop&h=627&w=1200",
+      "https://images.pexels.com/photos/32182595/pexels-photo-32182595.jpeg?auto=compress&cs=tinysrgb&fit=crop&h=627&w=1200"
+    ],
+    "attribution": [
+      {
+        "photographer": "K",
+        "photographer_url": "https://www.pexels.com/@kelly",
+        "photo_url": "https://www.pexels.com/photo/philadelphia-skyline-at-night-with-stadium-view-37143616/",
+        "provider": "Pexels"
+      },
+      {
+        "photographer": "K",
+        "photographer_url": "https://www.pexels.com/@kelly",
+        "photo_url": "https://www.pexels.com/photo/cityscape-with-residential-and-office-buildings-4642419/",
+        "provider": "Pexels"
+      },
+      {
+        "photographer": "Samyantak Mohanty",
+        "photographer_url": "https://www.pexels.com/@samyantak-mohanty-79378681",
+        "photo_url": "https://www.pexels.com/photo/stunning-philadelphia-skyline-at-twilight-32182595/",
+        "provider": "Pexels"
+      }
+    ]
+  },
+  "san-antonio": {
+    "label": "San Antonio, TX",
+    "aliases": [
+      "san antonio"
+    ],
+    "gallery": [
+      "https://images.pexels.com/photos/39387672/pexels-photo-39387672.jpeg?auto=compress&cs=tinysrgb&fit=crop&h=627&w=1200",
+      "https://images.pexels.com/photos/39387634/pexels-photo-39387634.jpeg?auto=compress&cs=tinysrgb&fit=crop&h=627&w=1200",
+      "https://images.pexels.com/photos/39387628/pexels-photo-39387628.jpeg?auto=compress&cs=tinysrgb&fit=crop&h=627&w=1200"
+    ],
+    "attribution": [
+      {
+        "photographer": "Mariya Eskina",
+        "photographer_url": "https://www.pexels.com/@mariya-eskina-555701080",
+        "photo_url": "https://www.pexels.com/photo/serene-evening-at-san-antonio-river-walk-39387672/",
+        "provider": "Pexels"
+      },
+      {
+        "photographer": "Mariya Eskina",
+        "photographer_url": "https://www.pexels.com/@mariya-eskina-555701080",
+        "photo_url": "https://www.pexels.com/photo/colorful-riverwalk-dining-at-san-antonio-39387634/",
+        "provider": "Pexels"
+      },
+      {
+        "photographer": "Mariya Eskina",
+        "photographer_url": "https://www.pexels.com/@mariya-eskina-555701080",
+        "photo_url": "https://www.pexels.com/photo/scenic-view-of-san-antonio-riverwalk-restaurants-39387628/",
+        "provider": "Pexels"
+      }
+    ]
+  },
+  "san-diego": {
+    "label": "San Diego, CA",
+    "aliases": [
+      "san diego"
+    ],
+    "gallery": [
+      "https://images.pexels.com/photos/813793/pexels-photo-813793.jpeg?auto=compress&cs=tinysrgb&fit=crop&h=627&w=1200",
+      "https://images.pexels.com/photos/35120557/pexels-photo-35120557.jpeg?auto=compress&cs=tinysrgb&fit=crop&h=627&w=1200",
+      "https://images.pexels.com/photos/8980257/pexels-photo-8980257.jpeg?auto=compress&cs=tinysrgb&fit=crop&h=627&w=1200"
+    ],
+    "attribution": [
+      {
+        "photographer": "Humphrey  Jones-Behan",
+        "photographer_url": "https://www.pexels.com/@humphrey007",
+        "photo_url": "https://www.pexels.com/photo/curtain-wall-high-rise-buildings-813793/",
+        "provider": "Pexels"
+      },
+      {
+        "photographer": "Stephen Leonardi",
+        "photographer_url": "https://www.pexels.com/@stephen-leonardi-587681991",
+        "photo_url": "https://www.pexels.com/photo/vibrant-night-skyline-of-san-diego-downtown-35120557/",
+        "provider": "Pexels"
+      },
+      {
+        "photographer": "Kindel Media",
+        "photographer_url": "https://www.pexels.com/@kindelmedia",
+        "photo_url": "https://www.pexels.com/photo/cityscape-scenery-during-nighttime-8980257/",
+        "provider": "Pexels"
+      }
+    ]
+  },
+  "dallas": {
+    "label": "Dallas, TX",
+    "aliases": [
+      "dallas"
+    ],
+    "gallery": [
+      "https://images.pexels.com/photos/13250722/pexels-photo-13250722.jpeg?auto=compress&cs=tinysrgb&fit=crop&h=627&w=1200",
+      "https://images.pexels.com/photos/11926780/pexels-photo-11926780.jpeg?auto=compress&cs=tinysrgb&fit=crop&h=627&w=1200",
+      "https://images.pexels.com/photos/2051002/pexels-photo-2051002.jpeg?auto=compress&cs=tinysrgb&fit=crop&h=627&w=1200"
+    ],
+    "attribution": [
+      {
+        "photographer": "Anat Morad",
+        "photographer_url": "https://www.pexels.com/@anat-morad-275582206",
+        "photo_url": "https://www.pexels.com/photo/city-view-under-blue-sky-13250722/",
+        "provider": "Pexels"
+      },
+      {
+        "photographer": "Phil Mitchell",
+        "photographer_url": "https://www.pexels.com/@phil-mitchell-161192924",
+        "photo_url": "https://www.pexels.com/photo/reunion-tower-in-dallas-11926780/",
+        "provider": "Pexels"
+      },
+      {
+        "photographer": "Huihui Zhang",
+        "photographer_url": "https://www.pexels.com/@huihui-zhang-1067274",
+        "photo_url": "https://www.pexels.com/photo/aerial-photo-of-city-buildings-2051002/",
+        "provider": "Pexels"
+      }
+    ]
+  },
+  "jacksonville": {
+    "label": "Jacksonville, FL",
+    "aliases": [
+      "jacksonville"
+    ],
+    "gallery": [
+      "https://images.pexels.com/photos/10788521/pexels-photo-10788521.jpeg?auto=compress&cs=tinysrgb&fit=crop&h=627&w=1200",
+      "https://images.pexels.com/photos/15058860/pexels-photo-15058860.jpeg?auto=compress&cs=tinysrgb&fit=crop&h=627&w=1200",
+      "https://images.pexels.com/photos/20708698/pexels-photo-20708698.jpeg?auto=compress&cs=tinysrgb&fit=crop&h=627&w=1200"
+    ],
+    "attribution": [
+      {
+        "photographer": "Mike Jones",
+        "photographer_url": "https://www.pexels.com/@jacksonvillepixels",
+        "photo_url": "https://www.pexels.com/photo/pink-sunset-over-jacksonville-florida-10788521/",
+        "provider": "Pexels"
+      },
+      {
+        "photographer": "Mike Jones",
+        "photographer_url": "https://www.pexels.com/@jacksonvillepixels",
+        "photo_url": "https://www.pexels.com/photo/modern-buildings-near-bridge-in-waterfront-city-15058860/",
+        "provider": "Pexels"
+      },
+      {
+        "photographer": "K",
+        "photographer_url": "https://www.pexels.com/@kelly",
+        "photo_url": "https://www.pexels.com/photo/downtown-of-jacksonville-20708698/",
+        "provider": "Pexels"
+      }
+    ]
+  },
+  "austin": {
+    "label": "Austin, TX",
+    "aliases": [
+      "austin"
+    ],
+    "gallery": [
+      "https://images.pexels.com/photos/20185085/pexels-photo-20185085.jpeg?auto=compress&cs=tinysrgb&fit=crop&h=627&w=1200",
+      "https://images.pexels.com/photos/18583622/pexels-photo-18583622.jpeg?auto=compress&cs=tinysrgb&fit=crop&h=627&w=1200",
+      "https://images.pexels.com/photos/37215506/pexels-photo-37215506.jpeg?auto=compress&cs=tinysrgb&fit=crop&h=627&w=1200"
+    ],
+    "attribution": [
+      {
+        "photographer": "Elsie Soto",
+        "photographer_url": "https://www.pexels.com/@elsiebsoto",
+        "photo_url": "https://www.pexels.com/photo/skyscrapers-by-river-in-austin-at-night-20185085/",
+        "provider": "Pexels"
+      },
+      {
+        "photographer": "Drone Task Force",
+        "photographer_url": "https://www.pexels.com/@dronetaskforce",
+        "photo_url": "https://www.pexels.com/photo/river-in-austin-18583622/",
+        "provider": "Pexels"
+      },
+      {
+        "photographer": "Phil Evenden",
+        "photographer_url": "https://www.pexels.com/@philevenphotos",
+        "photo_url": "https://www.pexels.com/photo/austin-skyline-reflected-in-lady-bird-lake-at-daybreak-37215506/",
+        "provider": "Pexels"
+      }
+    ]
+  },
+  "fort-worth": {
+    "label": "Fort Worth, TX",
+    "aliases": [
+      "fort worth"
+    ],
+    "gallery": [
+      "https://images.pexels.com/photos/10393078/pexels-photo-10393078.jpeg?auto=compress&cs=tinysrgb&fit=crop&h=627&w=1200",
+      "https://images.pexels.com/photos/36847210/pexels-photo-36847210.png?auto=compress&cs=tinysrgb&fit=crop&h=627&w=1200",
+      "https://images.pexels.com/photos/11863074/pexels-photo-11863074.jpeg?auto=compress&cs=tinysrgb&fit=crop&h=627&w=1200"
+    ],
+    "attribution": [
+      {
+        "photographer": "Talena Reese",
+        "photographer_url": "https://www.pexels.com/@talenareese",
+        "photo_url": "https://www.pexels.com/photo/buildings-in-a-city-10393078/",
+        "provider": "Pexels"
+      },
+      {
+        "photographer": "Talena Reese",
+        "photographer_url": "https://www.pexels.com/@talenareese",
+        "photo_url": "https://www.pexels.com/photo/fort-worth-skyline-at-sunset-in-texas-36847210/",
+        "provider": "Pexels"
+      },
+      {
+        "photographer": "Talena Reese",
+        "photographer_url": "https://www.pexels.com/@talenareese",
+        "photo_url": "https://www.pexels.com/photo/park-and-bridge-near-river-in-city-downtown-11863074/",
+        "provider": "Pexels"
+      }
+    ]
+  },
+  "san-jose": {
+    "label": "San Jose, CA",
+    "aliases": [
+      "san jose"
+    ],
+    "gallery": [
+      "https://images.pexels.com/photos/6654863/pexels-photo-6654863.jpeg?auto=compress&cs=tinysrgb&fit=crop&h=627&w=1200",
+      "https://images.pexels.com/photos/6654862/pexels-photo-6654862.jpeg?auto=compress&cs=tinysrgb&fit=crop&h=627&w=1200",
+      "https://images.pexels.com/photos/18353678/pexels-photo-18353678.jpeg?auto=compress&cs=tinysrgb&fit=crop&h=627&w=1200"
+    ],
+    "attribution": [
+      {
+        "photographer": "KEHN HERMANO",
+        "photographer_url": "https://www.pexels.com/@brotherkehn",
+        "photo_url": "https://www.pexels.com/photo/aerial-photography-of-city-buildings-under-a-bright-sun-6654863/",
+        "provider": "Pexels"
+      },
+      {
+        "photographer": "KEHN HERMANO",
+        "photographer_url": "https://www.pexels.com/@brotherkehn",
+        "photo_url": "https://www.pexels.com/photo/aerial-photography-of-city-buildings-under-a-bright-sun-6654862/",
+        "provider": "Pexels"
+      },
+      {
+        "photographer": "Stephen Leonardi",
+        "photographer_url": "https://www.pexels.com/@stephen-leonardi-587681991",
+        "photo_url": "https://www.pexels.com/photo/aerial-view-of-san-diego-california-usa-18353678/",
+        "provider": "Pexels"
+      }
+    ]
+  },
+  "columbus": {
+    "label": "Columbus, OH",
+    "aliases": [
+      "columbus"
+    ],
+    "gallery": [
+      "https://images.pexels.com/photos/8331320/pexels-photo-8331320.jpeg?auto=compress&cs=tinysrgb&fit=crop&h=627&w=1200",
+      "https://images.pexels.com/photos/31193155/pexels-photo-31193155.jpeg?auto=compress&cs=tinysrgb&fit=crop&h=627&w=1200",
+      "https://images.pexels.com/photos/8331369/pexels-photo-8331369.jpeg?auto=compress&cs=tinysrgb&fit=crop&h=627&w=1200"
+    ],
+    "attribution": [
+      {
+        "photographer": "Chris F",
+        "photographer_url": "https://www.pexels.com/@chris-f-38966",
+        "photo_url": "https://www.pexels.com/photo/park-and-river-near-modern-city-downtown-8331320/",
+        "provider": "Pexels"
+      },
+      {
+        "photographer": "Jimmy T",
+        "photographer_url": "https://www.pexels.com/@jimmyraww",
+        "photo_url": "https://www.pexels.com/photo/urban-riverside-skyline-with-modern-buildings-31193155/",
+        "provider": "Pexels"
+      },
+      {
+        "photographer": "Chris F",
+        "photographer_url": "https://www.pexels.com/@chris-f-38966",
+        "photo_url": "https://www.pexels.com/photo/city-skyline-under-blue-sky-8331369/",
+        "provider": "Pexels"
+      }
+    ]
+  },
+  "charlotte": {
+    "label": "Charlotte, NC",
+    "aliases": [
+      "charlotte"
+    ],
+    "gallery": [
+      "https://images.pexels.com/photos/18931263/pexels-photo-18931263.jpeg?auto=compress&cs=tinysrgb&fit=crop&h=627&w=1200",
+      "https://images.pexels.com/photos/18802845/pexels-photo-18802845.jpeg?auto=compress&cs=tinysrgb&fit=crop&h=627&w=1200",
+      "https://images.pexels.com/photos/33971181/pexels-photo-33971181.jpeg?auto=compress&cs=tinysrgb&fit=crop&h=627&w=1200"
+    ],
+    "attribution": [
+      {
+        "photographer": "andres Nino",
+        "photographer_url": "https://www.pexels.com/@andres-nino-760836985",
+        "photo_url": "https://www.pexels.com/photo/cityscape-with-skyscrapers-and-bank-of-america-stadium-in-charlotte-north-carolina-usa-18931263/",
+        "provider": "Pexels"
+      },
+      {
+        "photographer": "andres Nino",
+        "photographer_url": "https://www.pexels.com/@andres-nino-760836985",
+        "photo_url": "https://www.pexels.com/photo/city-in-summer-18802845/",
+        "provider": "Pexels"
+      },
+      {
+        "photographer": "Mahoney Fotos",
+        "photographer_url": "https://www.pexels.com/@mahoneyfotos",
+        "photo_url": "https://www.pexels.com/photo/charlotte-skyline-view-with-lush-greenery-33971181/",
+        "provider": "Pexels"
+      }
+    ]
+  },
+  "indianapolis": {
+    "label": "Indianapolis, IN",
+    "aliases": [
+      "indianapolis"
+    ],
+    "gallery": [
+      "https://images.pexels.com/photos/9317443/pexels-photo-9317443.jpeg?auto=compress&cs=tinysrgb&fit=crop&h=627&w=1200",
+      "https://images.pexels.com/photos/4372134/pexels-photo-4372134.jpeg?auto=compress&cs=tinysrgb&fit=crop&h=627&w=1200",
+      "https://images.pexels.com/photos/2083844/pexels-photo-2083844.jpeg?auto=compress&cs=tinysrgb&fit=crop&h=627&w=1200"
+    ],
+    "attribution": [
+      {
+        "photographer": "K",
+        "photographer_url": "https://www.pexels.com/@kelly",
+        "photo_url": "https://www.pexels.com/photo/aerial-view-of-a-metropolitan-area-9317443/",
+        "provider": "Pexels"
+      },
+      {
+        "photographer": "K",
+        "photographer_url": "https://www.pexels.com/@kelly",
+        "photo_url": "https://www.pexels.com/photo/aerial-view-of-city-buildings-4372134/",
+        "provider": "Pexels"
+      },
+      {
+        "photographer": "Chait Goli",
+        "photographer_url": "https://www.pexels.com/@chaitaastic",
+        "photo_url": "https://www.pexels.com/photo/building-and-garden-scenery-2083844/",
+        "provider": "Pexels"
+      }
+    ]
+  },
+  "san-francisco": {
+    "label": "San Francisco, CA",
+    "aliases": [
+      "san francisco",
+      "sf"
+    ],
+    "gallery": [
+      "https://images.pexels.com/photos/12708485/pexels-photo-12708485.jpeg?auto=compress&cs=tinysrgb&fit=crop&h=627&w=1200",
+      "https://images.pexels.com/photos/18155774/pexels-photo-18155774.jpeg?auto=compress&cs=tinysrgb&fit=crop&h=627&w=1200",
+      "https://images.pexels.com/photos/313784/pexels-photo-313784.jpeg?auto=compress&cs=tinysrgb&fit=crop&h=627&w=1200"
+    ],
+    "attribution": [
+      {
+        "photographer": "Malcolm Hill",
+        "photographer_url": "https://www.pexels.com/@malcolmhill",
+        "photo_url": "https://www.pexels.com/photo/city-buildings-near-body-of-water-12708485/",
+        "provider": "Pexels"
+      },
+      {
+        "photographer": "Jeffry Surianto",
+        "photographer_url": "https://www.pexels.com/@andromeda99",
+        "photo_url": "https://www.pexels.com/photo/san-francisco-cityscape-with-transamerica-pyramid-18155774/",
+        "provider": "Pexels"
+      },
+      {
+        "photographer": "Quintin Gellar",
+        "photographer_url": "https://www.pexels.com/@quintingellar",
+        "photo_url": "https://www.pexels.com/photo/view-of-city-at-waterfront-313784/",
+        "provider": "Pexels"
+      }
+    ]
+  },
+  "seattle": {
+    "label": "Seattle, WA",
+    "aliases": [
+      "seattle"
+    ],
+    "gallery": [
+      "https://images.pexels.com/photos/18533086/pexels-photo-18533086.jpeg?auto=compress&cs=tinysrgb&fit=crop&h=627&w=1200",
+      "https://images.pexels.com/photos/29123790/pexels-photo-29123790.jpeg?auto=compress&cs=tinysrgb&fit=crop&h=627&w=1200",
+      "https://images.pexels.com/photos/29390335/pexels-photo-29390335.jpeg?auto=compress&cs=tinysrgb&fit=crop&h=627&w=1200"
+    ],
+    "attribution": [
+      {
+        "photographer": "I Bautista",
+        "photographer_url": "https://www.pexels.com/@ibautista",
+        "photo_url": "https://www.pexels.com/photo/black-and-white-photo-of-a-skyline-of-a-modern-city-18533086/",
+        "provider": "Pexels"
+      },
+      {
+        "photographer": "dumitru B",
+        "photographer_url": "https://www.pexels.com/@dumitru-b-742240889",
+        "photo_url": "https://www.pexels.com/photo/stunning-aerial-cityscape-of-seattle-at-twilight-29123790/",
+        "provider": "Pexels"
+      },
+      {
+        "photographer": "Jeffrey Eisen",
+        "photographer_url": "https://www.pexels.com/@jeffrey-eisen-1257101",
+        "photo_url": "https://www.pexels.com/photo/seattle-waterfront-skyline-with-modern-skyscrapers-29390335/",
+        "provider": "Pexels"
+      }
+    ]
+  },
+  "denver": {
+    "label": "Denver, CO",
+    "aliases": [
+      "denver"
+    ],
+    "gallery": [
+      "https://images.pexels.com/photos/16108565/pexels-photo-16108565.jpeg?auto=compress&cs=tinysrgb&fit=crop&h=627&w=1200",
+      "https://images.pexels.com/photos/9737552/pexels-photo-9737552.jpeg?auto=compress&cs=tinysrgb&fit=crop&h=627&w=1200",
+      "https://images.pexels.com/photos/31408366/pexels-photo-31408366.jpeg?auto=compress&cs=tinysrgb&fit=crop&h=627&w=1200"
+    ],
+    "attribution": [
+      {
+        "photographer": "Noel Aph",
+        "photographer_url": "https://www.pexels.com/@noelace",
+        "photo_url": "https://www.pexels.com/photo/denver-downtown-at-sunset-16108565/",
+        "provider": "Pexels"
+      },
+      {
+        "photographer": "Jakob Rosen",
+        "photographer_url": "https://www.pexels.com/@jakob-rosen-114876126",
+        "photo_url": "https://www.pexels.com/photo/view-of-a-park-at-sunset-9737552/",
+        "provider": "Pexels"
+      },
+      {
+        "photographer": "Andrew Patrick Photo",
+        "photographer_url": "https://www.pexels.com/@am83",
+        "photo_url": "https://www.pexels.com/photo/downtown-denver-skyline-with-industrial-foreground-31408366/",
+        "provider": "Pexels"
+      }
+    ]
+  },
+  "washington-dc": {
+    "label": "Washington, DC",
+    "aliases": [
+      "washington dc",
+      "washington, dc",
+      "district of columbia"
+    ],
+    "gallery": [
+      "https://images.pexels.com/photos/18466726/pexels-photo-18466726.jpeg?auto=compress&cs=tinysrgb&fit=crop&h=627&w=1200",
+      "https://images.pexels.com/photos/208766/pexels-photo-208766.jpeg?auto=compress&cs=tinysrgb&fit=crop&h=627&w=1200",
+      "https://images.pexels.com/photos/36658226/pexels-photo-36658226.jpeg?auto=compress&cs=tinysrgb&fit=crop&h=627&w=1200"
+    ],
+    "attribution": [
+      {
+        "photographer": "Mark Stebnicki",
+        "photographer_url": "https://www.pexels.com/@nc-farm-bureau-mark",
+        "photo_url": "https://www.pexels.com/photo/the-wharf-harbor-with-terminal-in-washington-dc-18466726/",
+        "provider": "Pexels"
+      },
+      {
+        "photographer": "Pixabay",
+        "photographer_url": "https://www.pexels.com/@pixabay",
+        "photo_url": "https://www.pexels.com/photo/birds-eye-photography-of-white-concrete-building-208766/",
+        "provider": "Pexels"
+      },
+      {
+        "photographer": "Quang Vuong",
+        "photographer_url": "https://www.pexels.com/@quang-vuong-724225078",
+        "photo_url": "https://www.pexels.com/photo/iconic-washington-monument-and-us-capitol-36658226/",
+        "provider": "Pexels"
+      }
+    ]
+  }
 }

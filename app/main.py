@@ -8,15 +8,19 @@ from dotenv import load_dotenv
 # Production values still come from the systemd EnvironmentFile on EC2.
 load_dotenv()
 
-from .storage import add_inquiry_message, append_reply, change_request_summaries, confirm_client_schedule_selection, confirm_schedule_request, create_auth_session, get_change_request, get_schedule_request, get_client_shoot_ideas, get_inquiry, get_session_user, inquiry_timeline, list_inquiries, list_inquiry_messages, list_photographers, message_summaries, pre_shoot_checkin_summaries, record_event, resolve_change_request, revoke_auth_session, save_change_request, save_client_shoot_ideas, save_inquiry, save_pre_shoot_checkin, save_schedule_suggestions, scheduled_times, select_schedule_suggestion, unread_message_counts, update_analysis, update_meeting_location, update_user_profile, create_user, authenticate_user, save_creative_brief, save_moodboard, save_production_pack, approve_production_pack, set_client_decision, schedule_inquiry
+from .storage import add_inquiry_message, append_reply, change_request_summaries, confirm_client_schedule_selection, confirm_schedule_request, create_auth_session, get_change_request, get_schedule_request, get_client_shoot_ideas, get_inquiry, get_session_user, inquiry_timeline, list_inquiries, list_inquiry_followups, list_inquiry_messages, list_photographers, message_summaries, pre_shoot_checkin_summaries, record_event, resolve_change_request, revoke_auth_session, save_change_request, save_client_shoot_ideas, save_inquiry, save_pre_shoot_checkin, save_schedule_suggestions, scheduled_times, select_schedule_suggestion, unread_message_counts, update_analysis, update_meeting_location, update_user_profile, create_user, authenticate_user, save_creative_brief, save_moodboard, save_production_pack, approve_production_pack, set_client_decision, schedule_inquiry
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 import json
 import hashlib
 import re
+import threading
+import uuid
+import os
+import time
 from datetime import datetime, timedelta
 from urllib.parse import urlencode
-from urllib.request import urlopen
+from urllib.request import Request as UrlRequest, urlopen
 
 from .agent import analyze_inquiry, assess_change_request, build_production_pack, create_creative_brief, create_moodboard, draft_change_client_update, recommend_next_shoot_ideas, recommend_schedule_slots
 from .images import generate_moodboard_images
@@ -44,7 +48,78 @@ from .models import (
     ShootIdeaRecommendations,
 )
 
+
+_moodboard_jobs: dict[str, dict] = {}
+_moodboard_jobs_lock = threading.Lock()
+_city_image_cache: dict[str, tuple[float, dict]] = {}
+_city_image_cache_lock = threading.Lock()
+
+
+def _start_moodboard_job(inquiry_id: int | None, moodboard: Moodboard) -> str:
+    job_id = uuid.uuid4().hex
+    with _moodboard_jobs_lock:
+        _moodboard_jobs[job_id] = {
+            "status": "generating",
+            "inquiry_id": inquiry_id,
+            "moodboard": moodboard.model_dump(),
+            "tiles": [None] * len(moodboard.tiles),
+            "error": None,
+        }
+
+    def run() -> None:
+        def on_tile(index, tile) -> None:
+            with _moodboard_jobs_lock:
+                job = _moodboard_jobs.get(job_id)
+                if job:
+                    job["tiles"][index] = tile.model_dump()
+                    tiles = list(job["tiles"])
+            # The project page reads persisted state, so save every completed
+            # tile instead of waiting for the entire image job to finish.
+            if inquiry_id:
+                save_moodboard(inquiry_id, {
+                    "moodboard": moodboard.model_dump(),
+                    "generated": {"title": moodboard.title, "model_id": "gpt-image-2.5-flare", "tiles": tiles},
+                    "status": "generating",
+                })
+
+        try:
+            generated = generate_moodboard_images(moodboard, on_tile=on_tile)
+            if inquiry_id:
+                save_moodboard(inquiry_id, {"moodboard": moodboard.model_dump(), "generated": generated.model_dump(), "status": "complete"})
+            with _moodboard_jobs_lock:
+                job = _moodboard_jobs.get(job_id)
+                if job:
+                    job["status"] = "complete"
+        except Exception as exc:
+            print(f"[ShotCraft moodboard] Async generation failed: {exc}")
+            with _moodboard_jobs_lock:
+                job = _moodboard_jobs.get(job_id)
+                if job:
+                    job["status"] = "failed"
+                    job["error"] = "The image provider could not complete this moodboard."
+            if inquiry_id:
+                save_moodboard(inquiry_id, {
+                    "moodboard": moodboard.model_dump(),
+                    "generated": {"title": moodboard.title, "model_id": "gpt-image-2.5-flare", "tiles": [None] * len(moodboard.tiles)},
+                    "status": "failed",
+                })
+
+    threading.Thread(target=run, daemon=True).start()
+    return job_id
+
 app = FastAPI(title="ShotCraft API", version="0.1.0")
+
+
+@app.middleware("http")
+async def prevent_workspace_bundle_caching(request: Request, call_next):
+    """Always serve the evolving client workspace assets fresh in development."""
+    response = await call_next(request)
+    if request.url.path in {"/static/client-workspace.js", "/static/client-workspace.css", "/static/client.html", "/static/us-cities.json", "/static/photographer-spa.js", "/static/photographer-spa.css", "/static/photographer.html"}:
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        response.headers["Pragma"] = "no-cache"
+    return response
+
+
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
 @app.get("/favicon.ico", include_in_schema=False)
@@ -161,12 +236,53 @@ def get_photographers(search: str = "", city: str = "") -> list[dict[str, str | 
     return list_photographers(search, city)
 
 
+@app.get("/api/city-images")
+def get_city_images(city: str) -> dict:
+    """Find a small, cached Pexels fallback gallery for an uncatalogued city."""
+    label = re.sub(r"\s+", " ", city).strip()
+    if not label or len(label) > 100:
+        raise HTTPException(status_code=400, detail="Enter a valid city name.")
+    cache_key = label.lower()
+    now = time.monotonic()
+    with _city_image_cache_lock:
+        cached = _city_image_cache.get(cache_key)
+        if cached and now - cached[0] < 86_400:
+            return cached[1]
+
+    api_key = os.getenv("PEXELS_API_KEY")
+    if not api_key:
+        return {"label": label, "gallery": [], "attribution": []}
+    try:
+        params = urlencode({"query": f"{label} city skyline", "orientation": "landscape", "per_page": 3})
+        request = UrlRequest(
+            f"https://api.pexels.com/v1/search?{params}",
+            headers={"Authorization": api_key, "User-Agent": "ShotCraft city-image fallback"},
+        )
+        with urlopen(request, timeout=12) as response:
+            photos = json.load(response).get("photos", [])
+        result = {
+            "label": label,
+            "aliases": [label.lower()],
+            "gallery": [photo["src"]["landscape"] for photo in photos[:3]],
+            "attribution": [
+                {"photographer": photo["photographer"], "photographer_url": photo["photographer_url"], "photo_url": photo["url"], "provider": "Pexels"}
+                for photo in photos[:3]
+            ],
+        }
+    except Exception as exc:
+        print(f"[ShotCraft city images] Pexels fallback failed for {label}: {exc}")
+        result = {"label": label, "gallery": [], "attribution": []}
+    with _city_image_cache_lock:
+        _city_image_cache[cache_key] = (now, result)
+    return result
+
+
 @app.get("/client")
 def client_inquiry_page(request: Request):
     user = _current_user(request)
     if not user or user["user_type"] != "client":
         return RedirectResponse("/auth?mode=login", status_code=303)
-    return FileResponse("static/client.html")
+    return FileResponse("static/client.html", headers={"Cache-Control": "no-store, max-age=0"})
 
 @app.get("/client/follow-up")
 def client_follow_up_page(id: int | None = None) -> RedirectResponse:
@@ -192,7 +308,7 @@ def photographer_dashboard(request: Request):
     user = _current_user(request)
     if not user or user["user_type"] != "photographer":
         return RedirectResponse("/auth?mode=login", status_code=303)
-    return FileResponse("static/photographer.html")
+    return FileResponse("static/photographer.html", headers={"Cache-Control": "no-store, max-age=0"})
 
 @app.get("/photographer/inquiries")
 def photographer_inquiries() -> RedirectResponse:
@@ -250,11 +366,35 @@ def process_inquiry(inquiry_id: int, inquiry: Inquiry) -> None:
             # Prepare one complete, editable plan for the photographer. A plan is
             # not considered drafted until the visual references have rendered.
             try:
+                # Make the in-progress state visible to the photographer as soon
+                # as the client submits their complete follow-up—before the brief
+                # generation call itself has returned.
+                save_moodboard(inquiry_id, {
+                    "moodboard": {"title": "Preparing creative direction", "tiles": []},
+                    "generated": {"title": "Preparing creative direction", "model_id": "gpt-image-2.5-flare", "tiles": [None, None, None, None]},
+                    "status": "generating",
+                })
                 brief = create_creative_brief(BriefRequest(inquiry=inquiry, inquiry_id=inquiry_id))
                 save_creative_brief(inquiry_id, brief.model_dump())
                 moodboard = create_moodboard(MoodboardRequest(brief=brief, inquiry_id=inquiry_id))
-                generated = generate_moodboard_images(moodboard)
-                save_moodboard(inquiry_id, {"moodboard": moodboard.model_dump(), "generated": generated.model_dump()})
+                planned_tiles = moodboard.tiles
+                partial_tiles: list[dict | None] = [None] * len(planned_tiles)
+                save_moodboard(inquiry_id, {
+                    "moodboard": moodboard.model_dump(),
+                    "generated": {"title": moodboard.title, "model_id": "gpt-image-2.5-flare", "tiles": partial_tiles},
+                    "status": "generating",
+                })
+
+                def save_completed_tile(index, tile) -> None:
+                    partial_tiles[index] = tile.model_dump()
+                    save_moodboard(inquiry_id, {
+                        "moodboard": moodboard.model_dump(),
+                        "generated": {"title": moodboard.title, "model_id": "gpt-image-2.5-flare", "tiles": partial_tiles},
+                        "status": "generating",
+                    })
+
+                generated = generate_moodboard_images(moodboard, on_tile=save_completed_tile)
+                save_moodboard(inquiry_id, {"moodboard": moodboard.model_dump(), "generated": generated.model_dump(), "status": "complete"})
                 try:
                     pack = build_production_pack(inquiry, {"moodboard": moodboard.model_dump()})
                 except Exception as exc:
@@ -354,6 +494,7 @@ def get_client_shoot_ideas_endpoint(client_email: str, refresh: bool = False) ->
 def get_inquiry_detail(inquiry_id: int) -> dict:
     record = next((r for r in list_inquiries() if r["id"] == inquiry_id), None)
     if not record: return {"error": "Inquiry not found"}
+    record["followups"] = list_inquiry_followups(inquiry_id)
     record["timeline"] = inquiry_timeline(inquiry_id)
     record["pre_shoot_checkin"] = pre_shoot_checkin_summaries([inquiry_id]).get(inquiry_id)
     return record
@@ -735,6 +876,20 @@ def generate_moodboard_endpoint(moodboard: Moodboard) -> GeneratedMoodboard:
     return generate_moodboard_images(moodboard)
 
 
+@app.get("/api/moodboards/jobs/{job_id}")
+def moodboard_job_status(job_id: str):
+    with _moodboard_jobs_lock:
+        job = _moodboard_jobs.get(job_id)
+        if not job:
+            raise HTTPException(status_code=404, detail="Moodboard job not found.")
+        return {
+            "status": job["status"],
+            "moodboard": job["moodboard"],
+            "tiles": job["tiles"],
+            "error": job["error"],
+        }
+
+
 @app.post("/api/inquiries/{inquiry_id}/moodboard/render", response_model=GeneratedMoodboard)
 def render_saved_moodboard(inquiry_id: int) -> GeneratedMoodboard:
     """Render image references only when the photographer explicitly requests them."""
@@ -758,8 +913,8 @@ def render_saved_moodboard(inquiry_id: int) -> GeneratedMoodboard:
     return generated
 
 
-@app.post("/api/moodboards/create-and-generate", response_model=MoodboardResult)
-def create_and_generate_moodboard_endpoint(request: MoodboardRequest) -> MoodboardResult:
+@app.post("/api/moodboards/create-and-generate")
+def create_and_generate_moodboard_endpoint(request: MoodboardRequest):
     """Create the AI moodboard plan and render its tiles in one demo-friendly call."""
     # A moodboard is a visual planning aid, so optional questions suggested by the
     # brief agent must not deadlock the workflow after intake has already marked an
@@ -772,7 +927,14 @@ def create_and_generate_moodboard_endpoint(request: MoodboardRequest) -> Moodboa
         )
     try:
         moodboard = create_moodboard(request)
-        generated = generate_moodboard_images(moodboard)
+        inquiry_id = getattr(request, "inquiry_id", None)
+        if inquiry_id:
+            save_moodboard(inquiry_id, {
+                "moodboard": moodboard.model_dump(),
+                "generated": {"title": moodboard.title, "model_id": "gpt-image-2.5-flare", "tiles": [None] * len(moodboard.tiles)},
+                "status": "generating",
+            })
+        job_id = _start_moodboard_job(getattr(request, "inquiry_id", None), moodboard)
     except Exception as exc:
         root = exc
         while getattr(root, "__cause__", None):
@@ -792,12 +954,10 @@ def create_and_generate_moodboard_endpoint(request: MoodboardRequest) -> Moodboa
         else:
             detail = "The image provider could not complete this request. Check the server logs for the provider error and try again."
         raise HTTPException(status_code=502, detail=detail) from exc
-    result = MoodboardResult(moodboard=moodboard, generated=generated)
     inquiry_id = getattr(request, "inquiry_id", None)
     if inquiry_id:
         record_event(inquiry_id, "BRIEF_APPROVED")
-        save_moodboard(inquiry_id, result.model_dump())
-    return result
+    return {"job_id": job_id, "moodboard": moodboard.model_dump()}
 
 def _fallback_production_pack(inquiry: Inquiry, moodboard: dict | None = None) -> ProductionPack:
     """Keep the workflow moving when the planning model is unavailable or malformed."""

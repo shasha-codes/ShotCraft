@@ -2,6 +2,7 @@
 import json
 import sqlite3
 import hashlib
+import re
 import secrets
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
@@ -11,6 +12,12 @@ DB_PATH = Path(__file__).resolve().parent.parent / "data" / "shotcraft.db"
 
 def _ensure_schema(db: sqlite3.Connection) -> None:
     db.execute("CREATE TABLE IF NOT EXISTS inquiries (id INTEGER PRIMARY KEY, client_email TEXT, payload TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'NEW', analysis TEXT, updated_at TEXT DEFAULT CURRENT_TIMESTAMP)")
+    db.execute("""CREATE TABLE IF NOT EXISTS inquiry_followups (
+        id INTEGER PRIMARY KEY,
+        inquiry_id INTEGER NOT NULL,
+        answers TEXT NOT NULL,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP
+    )""")
     columns = {row[1] for row in db.execute("PRAGMA table_info(inquiries)")}
     if "analysis" not in columns: db.execute("ALTER TABLE inquiries ADD COLUMN analysis TEXT")
     if "updated_at" not in columns: db.execute("ALTER TABLE inquiries ADD COLUMN updated_at TEXT")
@@ -601,9 +608,27 @@ def append_reply(inquiry_id: int, answers: str) -> dict | None:
     if not record: return None
     payload = json.loads(record["payload"])
     payload["message"] += f"\n\nClient follow-up answers:\n{answers}"
+    # The follow-up asks for delivery scope when it was omitted at intake. Persist
+    # a stated final-image count so the planning workflow can begin immediately.
+    if payload.get("deliverable_count") is None:
+        match = re.search(r"\b(\d{1,3})\s*(?:final(?:\s+edited)?\s+)?(?:photos?|images?|shots?)\b", answers, re.IGNORECASE)
+        if match:
+            payload["deliverable_count"] = int(match.group(1))
     with sqlite3.connect(DB_PATH) as db:
         _ensure_schema(db)
         db.execute("UPDATE inquiries SET payload=?, status='NEW', updated_at=CURRENT_TIMESTAMP WHERE id=?", (json.dumps(payload), inquiry_id))
+        db.execute("INSERT INTO inquiry_followups (inquiry_id, answers) VALUES (?, ?)", (inquiry_id, answers.strip()))
         _record_event(db, inquiry_id, "FOLLOWUP_SUBMITTED", {"answers": answers})
         db.commit()
     return Inquiry(**payload).model_dump()
+
+
+def list_inquiry_followups(inquiry_id: int) -> list[dict]:
+    with sqlite3.connect(DB_PATH) as db:
+        db.row_factory = sqlite3.Row
+        _ensure_schema(db)
+        rows = db.execute(
+            "SELECT id, answers, created_at FROM inquiry_followups WHERE inquiry_id=? ORDER BY id DESC",
+            (inquiry_id,),
+        ).fetchall()
+    return [dict(row) for row in rows]
