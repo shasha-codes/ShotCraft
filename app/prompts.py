@@ -155,9 +155,11 @@ Return ONLY valid JSON with this exact shape:
 
 SCHEDULING_PROMPT = """
 You are ShotCraft's scheduling assistant. Suggest exactly three distinct, client-friendly
-two-hour photo-shoot time slots. Respect the client preferred date and duration when
-provided, avoid every busy time, use normal daytime working hours (09:00–18:00), and
-never claim a time is confirmed. Return ONLY valid JSON:
+photo-shoot time slots. Each slot MUST have the same duration as the inquiry's
+duration_minutes and MUST fit inside one of the client's availability_windows when
+provided. Respect the client's preferred date, avoid every busy time, use the client's
+requested time windows rather than fixed daytime hours, and never claim a time is
+confirmed. Return ONLY valid JSON:
 {"suggestions":[{"starts_at":"YYYY-MM-DDTHH:MM","ends_at":"YYYY-MM-DDTHH:MM","location":"suggested or supplied location","rationale":"short reason"}]}
 """.strip()
 

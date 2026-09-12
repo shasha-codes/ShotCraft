@@ -5,8 +5,10 @@ render=()=>current.view==='edit-shoot'?editShoot(current.id):finalClientRenderWi
 async function showRevisedTimeAction(id){
   const response=await fetch(`/api/inquiries/${id}/schedule-recommendations`,{cache:'no-store'}),request=response.ok?await response.json():null;
   if(request?.status!=='PENDING_CLIENT'||!request.suggestions?.length)return false;
+  const record=shoots.find(item=>Number(item.id)===Number(id))||await getRecord(id);
+  const isRevision=record.status==='SCHEDULED'&&record.change_request?.status==='PENDING';
   const actions=app.querySelector('.detail-next .actions');
-  if(actions&&!actions.querySelector('[data-revised-times]'))actions.insertAdjacentHTML('afterbegin',`<button class="primary" data-revised-times="${id}">Review revised times →</button>`);
+  if(actions&&!actions.querySelector('[data-revised-times]'))actions.insertAdjacentHTML('afterbegin',`<button class="primary" data-revised-times="${id}">${isRevision?'Review revised times':'Choose a shoot time'} →</button>`);
   return true;
 }
 
@@ -17,16 +19,29 @@ galleryDetail=async id=>{
   const record=await getRecord(id);
   if(!['SCHEDULED','CLIENT_CONFIRMED'].includes(record.status))return;
   const actions=app.querySelector('.detail-next .actions');
-  if(actions&&!actions.querySelector('[data-edit-shoot]'))actions.insertAdjacentHTML('beforeend',`<button class="secondary" data-edit-shoot="${id}">Edit shoot date or time</button>`);
+  if(actions){
+    if(!actions.querySelector('[data-edit-shoot]'))actions.insertAdjacentHTML('beforeend',`<button class="secondary" data-edit-shoot="${id}">Request a time change →</button>`);
+    else actions.querySelector('[data-edit-shoot]').textContent='Request a time change →';
+  }
 };
 
 const finalClientPlanWithShootEdit=cinematicPlan;
 cinematicPlan=async id=>{
   await finalClientPlanWithShootEdit(id);
   const record=await getRecord(id);
+  const decision=app.querySelector('.plan-decision');
+  if(record.status==='CANCELLED'){
+    decision?.querySelectorAll('[data-edit-shoot],[data-smart-schedule],[data-cancel-shoot]').forEach(button=>button.remove());
+    const copy=decision?.querySelector('p');
+    if(copy)copy.textContent=`This shoot has been cancelled. Cancellation fee: $${Number(record.cancellation_fee||0).toFixed(2)}. Estimated refund: $${Number(record.cancellation_refund||0).toFixed(2)}.`;
+    return;
+  }
   if(!['SCHEDULED','CLIENT_CONFIRMED'].includes(record.status))return;
-  const actions=app.querySelector('.plan-decision');
-  if(actions&&!actions.querySelector('[data-edit-shoot]'))actions.insertAdjacentHTML('beforeend',`<button class="secondary" data-edit-shoot="${id}">Edit shoot date or time</button>`);
+  const actions=decision;
+  if(actions){
+    if(!actions.querySelector('[data-edit-shoot]'))actions.insertAdjacentHTML('beforeend',`<button class="secondary" data-edit-shoot="${id}">Request a time change →</button>`);
+    else actions.querySelector('[data-edit-shoot]').textContent='Request a time change →';
+  }
 };
 
 // Surface photographer-proposed replacement times without requiring a manual refresh.
