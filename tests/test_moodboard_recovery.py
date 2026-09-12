@@ -17,10 +17,13 @@ class MoodboardRecoveryTests(unittest.TestCase):
             wardrobe_direction="casual", budget_notes="within budget", deliverables=["10 images"],
         )
         saved = []
+        def interrupted_direction(_id, _inquiry, _followups, on_brief, _on_moodboard):
+            on_brief(brief)
+            raise RuntimeError("provider unavailable")
         with (
-            patch.object(main, "analyze_inquiry", return_value=analysis),
-            patch.object(main, "create_creative_brief", return_value=brief),
-            patch.object(main, "create_moodboard", side_effect=RuntimeError("provider unavailable")) as create_plan,
+            patch.object(main, "coordinate_inquiry_intake", return_value={"analysis": analysis, "activity": [], "agent_used_tools": True}),
+            patch.object(main, "coordinate_creative_direction", side_effect=interrupted_direction) as create_plan,
+            patch.object(main, "list_inquiry_followups", return_value=[]),
             patch.object(main, "save_creative_brief") as save_brief,
             patch.object(main, "save_moodboard", side_effect=lambda _id, data: saved.append(data)),
             patch.object(main, "update_analysis"),
