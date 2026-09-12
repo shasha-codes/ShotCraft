@@ -47,6 +47,11 @@ class ScheduleSelection(BaseModel):
     ends_at: str = Field(min_length=1)
     location: str = Field(min_length=1)
 
+class ScheduleChangeRequest(BaseModel):
+    shoot_date: str = Field(min_length=10, max_length=32)
+    availability_windows: list[str] = Field(min_length=1, max_length=6)
+    note: str | None = Field(default=None, max_length=1200)
+
 
 class ScheduleProposal(BaseModel):
     suggestions: list[ScheduleSuggestion] = Field(min_length=1, max_length=5)
