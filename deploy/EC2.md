@@ -13,6 +13,10 @@ snapshot of `data/shotcraft.db`.
 - **Security group:** allow HTTP (TCP 80) from the internet and SSH (TCP 22)
   only from your own current IP address. Do not expose port 8000.
 
+Attach an EC2 instance role with `bedrock-agentcore:InvokeAgentRuntime` scoped
+to the ShotCraft runtime and its `runtime-endpoint/*` resources. Do not install
+personal AWS access keys on the instance.
+
 Associate an Elastic IP if you need a stable public address. For a short
 hackathon demo, using the EC2 public DNS name is also fine.
 
@@ -50,12 +54,15 @@ Example contents (use real values, never commit this file):
 
 ```dotenv
 AWS_REGION=us-west-2
-AWS_BEARER_TOKEN_BEDROCK=replace_with_your_bedrock_api_key
-SHOTCRAFT_MODEL=openai.gpt-oss-120b-1:0
-SHOTCRAFT_BEDROCK_ENDPOINT=https://bedrock-mantle.us-west-2.api.aws/v1
+SHOTCRAFT_AGENTCORE_ENABLED=true
+SHOTCRAFT_AGENTCORE_RUNTIME_ARN=arn:aws:bedrock-agentcore:us-west-2:ACCOUNT_ID:runtime/RUNTIME_ID
 OPENAI_API_KEY=replace_with_your_openai_key
 SHOTCRAFT_IMAGE_MODEL=gpt-image-2.5-flare
 ```
+
+The deployed AgentCore runtime reads its Mantle key from Secrets Manager. The
+EC2 app does not need that bearer key unless you intentionally enable local
+Strands fallback. Keep the production EC2 role limited to invoking AgentCore.
 
 If you are demoing without external image generation, omit `OPENAI_API_KEY` and
 do not use the moodboard-image generation action.

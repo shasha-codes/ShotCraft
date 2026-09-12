@@ -97,6 +97,7 @@ class ScheduleAlternativeTests(unittest.TestCase):
             result = main._schedule_recommendation_result(1, self.record)
         self.assertEqual(result["suggestions"][0]["starts_at"], "2026-09-14T09:00")
         self.assertNotIn("option_id", result["suggestions"][0])
+        self.assertFalse(result["agent_used_tools"])
 
     def test_reschedule_agent_receives_current_booking_and_prior_rounds(self):
         record = {**self.record, "call_time": "2026-09-14T08:00", "meeting_location": "Seattle"}

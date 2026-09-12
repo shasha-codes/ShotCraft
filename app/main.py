@@ -22,7 +22,7 @@ from datetime import datetime, timedelta
 from urllib.parse import urlencode
 from urllib.request import Request as UrlRequest, urlopen
 
-from .agent import analyze_inquiry, assess_change_request, build_production_pack, coordinate_cancellation_review, coordinate_schedule_slots, create_creative_brief, create_moodboard, draft_change_client_update, recommend_next_shoot_ideas
+from .agent import assess_change_request, build_production_pack, coordinate_cancellation_review, coordinate_creative_direction, coordinate_inquiry_intake, coordinate_schedule_slots, create_creative_brief, create_moodboard, draft_change_client_update, recommend_next_shoot_ideas
 from .images import generate_moodboard_images, public_image_error
 from .models import (
     BriefRequest,
@@ -374,8 +374,12 @@ def process_inquiry(inquiry_id: int, inquiry: Inquiry) -> None:
     """Run the resumable Strands-backed shoot-planning workflow."""
     try:
         update_planning_workflow(inquiry_id, "ANALYZING", "RUNNING", "Read the inquiry and client follow-up history")
-        result = analyze_inquiry(inquiry)
-        update_planning_workflow(inquiry_id, "ANALYZING", "COMPLETE", "Analyzed the shoot requirements with Strands")
+        intake = coordinate_inquiry_intake(inquiry_id, inquiry, list_inquiry_followups(inquiry_id))
+        result = intake["analysis"]
+        record_event(inquiry_id, "INTAKE_AGENT_TOOLS_COMPLETED", {
+            "agent_used_tools": intake["agent_used_tools"], "activity": intake["activity"],
+        })
+        update_planning_workflow(inquiry_id, "ANALYZING", "COMPLETE", "Strands reviewed the inquiry and follow-ups with intake tools")
         # Deliverable count is required for both pricing and the production brief.
         # Enforce this contract even if the intake model overlooks it.
         if inquiry.deliverable_count is None and "final_image_count" not in result.missing_information:
@@ -409,22 +413,33 @@ def process_inquiry(inquiry_id: int, inquiry: Inquiry) -> None:
                     "generated": {"title": "Preparing creative direction", "model_id": "gpt-image-2.5-flare", "tiles": [None, None, None, None]},
                     "status": "generating", "job_id": draft_job_id,
                 })
-                update_planning_workflow(inquiry_id, "CREATING_BRIEF", "RUNNING", "Turned the complete inquiry into a structured creative brief")
-                brief = create_creative_brief(BriefRequest(inquiry=inquiry, inquiry_id=inquiry_id))
-                save_creative_brief(inquiry_id, brief.model_dump())
-                update_planning_workflow(inquiry_id, "CREATING_MOODBOARD", "RUNNING", "Planned four visual directions from the approved client facts")
-                moodboard = create_moodboard(MoodboardRequest(brief=brief, inquiry_id=inquiry_id))
-                draft_moodboard = moodboard
-                planned_tiles = moodboard.tiles
-                partial_tiles: list[dict | None] = [None] * len(planned_tiles)
-                with _moodboard_jobs_lock:
-                    _moodboard_jobs[draft_job_id]["moodboard"] = moodboard.model_dump()
-                    _moodboard_jobs[draft_job_id]["tiles"] = partial_tiles
-                save_moodboard(inquiry_id, {
-                    "moodboard": moodboard.model_dump(),
-                    "generated": {"title": moodboard.title, "model_id": "gpt-image-2.5-flare", "tiles": partial_tiles},
-                    "status": "generating", "job_id": draft_job_id,
+                update_planning_workflow(inquiry_id, "CREATING_BRIEF", "RUNNING", "Strands is reviewing the inquiry and follow-ups with creative specialist tools")
+
+                def on_brief(brief: CreativeBrief) -> None:
+                    save_creative_brief(inquiry_id, brief.model_dump())
+                    update_planning_workflow(inquiry_id, "CREATING_MOODBOARD", "RUNNING", "Strands created the brief and is planning the visual direction")
+
+                def on_moodboard(moodboard: Moodboard) -> None:
+                    nonlocal draft_moodboard, partial_tiles
+                    draft_moodboard = moodboard
+                    partial_tiles = [None] * len(moodboard.tiles)
+                    with _moodboard_jobs_lock:
+                        _moodboard_jobs[draft_job_id]["moodboard"] = moodboard.model_dump()
+                        _moodboard_jobs[draft_job_id]["tiles"] = partial_tiles
+                    save_moodboard(inquiry_id, {
+                        "moodboard": moodboard.model_dump(),
+                        "generated": {"title": moodboard.title, "model_id": "gpt-image-2.5-flare", "tiles": partial_tiles},
+                        "status": "generating", "job_id": draft_job_id,
+                    })
+
+                direction = coordinate_creative_direction(
+                    inquiry_id, inquiry, list_inquiry_followups(inquiry_id), on_brief, on_moodboard,
+                )
+                moodboard = direction["moodboard"]
+                record_event(inquiry_id, "CREATIVE_AGENT_TOOLS_COMPLETED", {
+                    "agent_used_tools": direction["agent_used_tools"], "activity": direction["activity"],
                 })
+                update_planning_workflow(inquiry_id, "GENERATING_IMAGES", "RUNNING", "Strands completed the brief and moodboard plan; rendering image references")
 
                 def save_completed_tile(index, tile) -> None:
                     partial_tiles[index] = tile.model_dump()
@@ -787,7 +802,7 @@ def request_schedule_change(inquiry_id: int, change: ScheduleChangeRequest, requ
             suggestions,
             status="PENDING_PHOTOGRAPHER_REVIEW",
         )
-        save_schedule_agent_review(inquiry_id, {"summary": recommendation["summary"], "activity": recommendation["agent_activity"], "agent_used_tools": recommendation["agent_used_tools"], "suggestion_count": len(suggestions), "suggestions": suggestions})
+        save_schedule_agent_review(inquiry_id, {"summary": recommendation["summary"], "activity": recommendation["agent_activity"], "agent_used_tools": recommendation["agent_used_tools"], "agent_execution": recommendation.get("agent_execution", "unknown"), "suggestion_count": len(suggestions), "suggestions": suggestions})
         update_planning_workflow(inquiry_id, "PHOTOGRAPHER_REVIEW", "WAITING_FOR_PHOTOGRAPHER", f"Reviewed the time change and prepared {len(suggestions)} conflict-free alternative{'s' if len(suggestions) != 1 else ''}")
     except HTTPException as exc:
         suggestions = []
@@ -1071,21 +1086,24 @@ def _schedule_recommendation_result(inquiry_id: int, record: dict) -> dict:
             }} if rescheduling else {}),
         )
         by_id = {slot["option_id"]: slot for slot in identified}
-        selected = [by_id[option_id] for option_id in coordination["decision"]["selected_option_ids"] if option_id in by_id]
-        if selected:
-            identified = selected
+        selected_ids = coordination["decision"]["selected_option_ids"]
+        if not selected_ids or any(option_id not in by_id for option_id in selected_ids):
+            raise ValueError("Agent selected an option outside the validated candidate set")
+        identified = [by_id[option_id] for option_id in selected_ids]
         activity = coordination["activity"]
+        agent_execution = coordination.get("agent_execution", "local-strands")
     except Exception as exc:
         activity = [
             f"Read shoot context for inquiry {inquiry_id}",
             f"Checked {len(busy)} confirmed booking{'s' if len(busy) != 1 else ''}",
             f"Generated {len(identified)} deterministic conflict-free option{'s' if len(identified) != 1 else ''}",
-            f"Agent ranking unavailable ({type(exc).__name__}); preserved validated order",
+            f"Agent ranking unavailable ({type(exc).__name__}: {exc}); preserved validated order",
         ]
+        agent_execution = "local-fallback"
     suggestions = [{key: value for key, value in slot.items() if key != "option_id"} for slot in identified[:3]]
     used_tools = bool(activity and activity[-1] == "Ranked safe options for photographer review")
     summary = coordination["decision"]["summary"] if used_tools else "Calendar-checked options are ready for photographer review."
-    return {"suggestions": suggestions, "summary": summary, "agent_activity": activity, "agent_used_tools": used_tools}
+    return {"suggestions": suggestions, "summary": summary, "agent_activity": activity, "agent_used_tools": used_tools, "agent_execution": agent_execution}
 
 def _recommend_schedule_for_record(inquiry_id: int, record: dict) -> list[dict]:
     """Compatibility wrapper for callers that only need validated suggestions."""
@@ -1102,7 +1120,7 @@ def preview_schedule_recommendations(inquiry_id: int, request: Request) -> dict:
     existing = get_schedule_request(inquiry_id)
     if existing and existing.get("status") == "PENDING_PHOTOGRAPHER_REVIEW" and existing.get("suggestions"):
         review = (get_change_request(inquiry_id) or {}).get("assessment", {}).get("agent_review", {})
-        return {"suggestions": existing["suggestions"], "summary": review.get("summary", ""), "agent_activity": review.get("activity", []), "agent_used_tools": review.get("agent_used_tools", False)}
+        return {"suggestions": existing["suggestions"], "summary": review.get("summary", ""), "agent_activity": review.get("activity", []), "agent_used_tools": review.get("agent_used_tools", False), "agent_execution": review.get("agent_execution", "unknown")}
     result = _schedule_recommendation_result(inquiry_id, record)
     update_planning_workflow(inquiry_id, "PHOTOGRAPHER_REVIEW", "WAITING_FOR_PHOTOGRAPHER", f"Checked confirmed bookings and prepared {len(result['suggestions'])} safe time option{'s' if len(result['suggestions']) != 1 else ''}")
     return result

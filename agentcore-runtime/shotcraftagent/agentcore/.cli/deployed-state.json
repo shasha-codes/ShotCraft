@@ -1,0 +1,17 @@
+{
+  "targets": {
+    "shotcraft-account-a": {
+      "resources": {
+        "runtimes": {
+          "ShotcraftScheduling": {
+            "runtimeId": "shotcraftagent_ShotcraftScheduling-vfWv4H8Xs9",
+            "runtimeArn": "arn:aws:bedrock-agentcore:us-west-2:042269275839:runtime/shotcraftagent_ShotcraftScheduling-vfWv4H8Xs9",
+            "roleArn": "arn:aws:iam::042269275839:role/AgentCore-shotcraftagent--ApplicationAgentShotcraft-4dqd9CdGgdUb"
+          }
+        },
+        "stackName": "AgentCore-shotcraftagent-shotcraft-account-a",
+        "deployHash": "dd3bbd81ab6b3913"
+      }
+    }
+  }
+}
