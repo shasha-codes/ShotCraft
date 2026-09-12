@@ -26,6 +26,7 @@ class InquiryReply(BaseModel):
 
 class ClientDecision(BaseModel):
     note: str | None = None
+    cancellation_policy_accepted: bool = False
 
 class InquiryMessageCreate(BaseModel):
     body: str = Field(min_length=1, max_length=4000)
@@ -51,6 +52,15 @@ class ScheduleChangeRequest(BaseModel):
     shoot_date: str = Field(min_length=10, max_length=32)
     availability_windows: list[str] = Field(min_length=1, max_length=6)
     note: str | None = Field(default=None, max_length=1200)
+
+class CancellationRequest(BaseModel):
+    reason: str = Field(min_length=1, max_length=120)
+    note: str | None = Field(default=None, max_length=1200)
+
+class CancellationDecision(BaseModel):
+    message: str | None = Field(default=None, max_length=1200)
+    fee_mode: str = Field(default="POLICY", pattern="^(POLICY|WAIVED|CUSTOM)$")
+    cancellation_fee: float | None = Field(default=None, ge=0)
 
 
 class ScheduleProposal(BaseModel):

@@ -68,7 +68,8 @@ def _render_tile(tile, subject: str) -> GeneratedTile:
             "cartoon, or alternate clothing. Client brief and tile direction: " + tile.visual_prompt
             + " FINAL HARD CONSTRAINT: use only the client-specified clothing; no jacket, coat, bag, jewelry, hat, or added accessory. Keep generous headroom above the hair and never crop the head."
     )
-    client = OpenAI()
+    # A provider stall must eventually surface as a failed, retryable job.
+    client = OpenAI(timeout=120.0, max_retries=0)
     last_error: Exception | None = None
     # One normal attempt, then one conservative variation only when moderation
     # rejects the prompt. Retrying ordinary provider failures adds long waits.

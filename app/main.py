@@ -8,7 +8,7 @@ from dotenv import load_dotenv
 # Production values still come from the systemd EnvironmentFile on EC2.
 load_dotenv()
 
-from .storage import add_inquiry_message, append_reply, change_request_summaries, confirm_client_schedule_selection, confirm_schedule_request, create_auth_session, get_change_request, get_schedule_request, get_client_shoot_ideas, get_inquiry, get_session_user, inquiry_timeline, list_inquiries, list_inquiry_followups, list_inquiry_messages, list_photographers, message_summaries, pre_shoot_checkin_summaries, record_event, resolve_change_request, revoke_auth_session, save_change_request, save_client_shoot_ideas, save_inquiry, save_pre_shoot_checkin, save_schedule_suggestions, scheduled_times, select_schedule_suggestion, unread_message_counts, update_analysis, update_meeting_location, update_user_profile, create_user, authenticate_user, save_creative_brief, save_moodboard, save_production_pack, approve_production_pack, set_client_decision, schedule_inquiry
+from .storage import add_inquiry_message, append_reply, change_request_summaries, confirm_client_schedule_selection, confirm_schedule_request, create_auth_session, get_change_request, get_schedule_request, get_client_shoot_ideas, get_inquiry, get_session_user, inquiry_timeline, list_inquiries, list_inquiry_followups, list_inquiry_messages, list_photographers, message_summaries, pre_shoot_checkin_summaries, record_event, resolve_change_request, revoke_auth_session, save_change_request, save_client_shoot_ideas, save_inquiry, save_pre_shoot_checkin, save_schedule_suggestions, scheduled_times, select_schedule_suggestion, unread_message_counts, update_analysis, update_meeting_location, update_user_profile, create_user, authenticate_user, save_creative_brief, save_moodboard, save_production_pack, approve_production_pack, set_client_decision, schedule_inquiry, request_cancellation, decide_cancellation
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 import json
@@ -46,6 +46,8 @@ from .models import (
     ProfileUpdate,
     ChangeApproval,
     ChangeAssessment,
+    CancellationRequest,
+    CancellationDecision,
     ShootIdeaRecommendations,
 )
 
@@ -66,6 +68,12 @@ def _start_moodboard_job(inquiry_id: int | None, moodboard: Moodboard) -> str:
             "tiles": [None] * len(moodboard.tiles),
             "error": None,
         }
+    if inquiry_id:
+        save_moodboard(inquiry_id, {
+            "moodboard": moodboard.model_dump(),
+            "generated": {"title": moodboard.title, "model_id": "gpt-image-2.5-flare", "tiles": [None] * len(moodboard.tiles)},
+            "status": "generating", "job_id": job_id,
+        })
 
     def run() -> None:
         def on_tile(index, tile) -> None:
@@ -81,12 +89,13 @@ def _start_moodboard_job(inquiry_id: int | None, moodboard: Moodboard) -> str:
                     "moodboard": moodboard.model_dump(),
                     "generated": {"title": moodboard.title, "model_id": "gpt-image-2.5-flare", "tiles": tiles},
                     "status": "generating",
+                    "job_id": job_id,
                 })
 
         try:
             generated = generate_moodboard_images(moodboard, on_tile=on_tile)
             if inquiry_id:
-                save_moodboard(inquiry_id, {"moodboard": moodboard.model_dump(), "generated": generated.model_dump(), "status": "complete"})
+                save_moodboard(inquiry_id, {"moodboard": moodboard.model_dump(), "generated": generated.model_dump(), "status": "complete", "job_id": job_id})
             with _moodboard_jobs_lock:
                 job = _moodboard_jobs.get(job_id)
                 if job:
@@ -101,8 +110,8 @@ def _start_moodboard_job(inquiry_id: int | None, moodboard: Moodboard) -> str:
             if inquiry_id:
                 save_moodboard(inquiry_id, {
                     "moodboard": moodboard.model_dump(),
-                    "generated": {"title": moodboard.title, "model_id": "gpt-image-2.5-flare", "tiles": [None] * len(moodboard.tiles)},
-                    "status": "failed",
+                    "generated": {"title": moodboard.title, "model_id": "gpt-image-2.5-flare", "tiles": tiles if 'tiles' in locals() else [None] * len(moodboard.tiles)},
+                    "status": "failed", "job_id": job_id,
                 })
 
     threading.Thread(target=run, daemon=True).start()
@@ -366,6 +375,14 @@ def process_inquiry(inquiry_id: int, inquiry: Inquiry) -> None:
             record_event(inquiry_id, "QUESTIONS_ANSWERED")
             # Prepare one complete, editable plan for the photographer. A plan is
             # not considered drafted until the visual references have rendered.
+            draft_job_id = uuid.uuid4().hex
+            with _moodboard_jobs_lock:
+                _moodboard_jobs[draft_job_id] = {
+                    "status": "generating", "inquiry_id": inquiry_id,
+                    "moodboard": {}, "tiles": [None] * 4, "error": None,
+                }
+            draft_moodboard = None
+            partial_tiles = [None] * 4
             try:
                 # Make the in-progress state visible to the photographer as soon
                 # as the client submits their complete follow-up—before the brief
@@ -373,17 +390,21 @@ def process_inquiry(inquiry_id: int, inquiry: Inquiry) -> None:
                 save_moodboard(inquiry_id, {
                     "moodboard": {"title": "Preparing creative direction", "tiles": []},
                     "generated": {"title": "Preparing creative direction", "model_id": "gpt-image-2.5-flare", "tiles": [None, None, None, None]},
-                    "status": "generating",
+                    "status": "generating", "job_id": draft_job_id,
                 })
                 brief = create_creative_brief(BriefRequest(inquiry=inquiry, inquiry_id=inquiry_id))
                 save_creative_brief(inquiry_id, brief.model_dump())
                 moodboard = create_moodboard(MoodboardRequest(brief=brief, inquiry_id=inquiry_id))
+                draft_moodboard = moodboard
                 planned_tiles = moodboard.tiles
                 partial_tiles: list[dict | None] = [None] * len(planned_tiles)
+                with _moodboard_jobs_lock:
+                    _moodboard_jobs[draft_job_id]["moodboard"] = moodboard.model_dump()
+                    _moodboard_jobs[draft_job_id]["tiles"] = partial_tiles
                 save_moodboard(inquiry_id, {
                     "moodboard": moodboard.model_dump(),
                     "generated": {"title": moodboard.title, "model_id": "gpt-image-2.5-flare", "tiles": partial_tiles},
-                    "status": "generating",
+                    "status": "generating", "job_id": draft_job_id,
                 })
 
                 def save_completed_tile(index, tile) -> None:
@@ -391,11 +412,13 @@ def process_inquiry(inquiry_id: int, inquiry: Inquiry) -> None:
                     save_moodboard(inquiry_id, {
                         "moodboard": moodboard.model_dump(),
                         "generated": {"title": moodboard.title, "model_id": "gpt-image-2.5-flare", "tiles": partial_tiles},
-                        "status": "generating",
+                        "status": "generating", "job_id": draft_job_id,
                     })
 
                 generated = generate_moodboard_images(moodboard, on_tile=save_completed_tile)
-                save_moodboard(inquiry_id, {"moodboard": moodboard.model_dump(), "generated": generated.model_dump(), "status": "complete"})
+                save_moodboard(inquiry_id, {"moodboard": moodboard.model_dump(), "generated": generated.model_dump(), "status": "complete", "job_id": draft_job_id})
+                with _moodboard_jobs_lock:
+                    _moodboard_jobs[draft_job_id]["status"] = "complete"
                 try:
                     pack = build_production_pack(inquiry, {"moodboard": moodboard.model_dump()})
                 except Exception as exc:
@@ -407,6 +430,17 @@ def process_inquiry(inquiry_id: int, inquiry: Inquiry) -> None:
             except Exception as exc:
                 # Keep the request available to the photographer, but never mark
                 # the production plan as drafted without its image references.
+                with _moodboard_jobs_lock:
+                    job = _moodboard_jobs[draft_job_id]
+                    if job["status"] == "generating":
+                        job["status"] = "failed"
+                        job["error"] = "The moodboard could not be prepared."
+                        title = draft_moodboard.title if draft_moodboard else "Preparing creative direction"
+                        save_moodboard(inquiry_id, {
+                            "moodboard": draft_moodboard.model_dump() if draft_moodboard else {"title": title, "tiles": []},
+                            "generated": {"title": title, "model_id": "gpt-image-2.5-flare", "tiles": partial_tiles},
+                            "status": "failed", "job_id": draft_job_id,
+                        })
                 update_analysis(inquiry_id, "READY_FOR_REVIEW", result.model_dump())
                 print(f"[ShotCraft draft plan] Generation failed for inquiry {inquiry_id}: {exc}")
         print(f"[ShotCraft notification] Inquiry {inquiry_id}: {status}")
@@ -495,6 +529,16 @@ def get_client_shoot_ideas_endpoint(client_email: str, refresh: bool = False) ->
 def get_inquiry_detail(inquiry_id: int) -> dict:
     record = next((r for r in list_inquiries() if r["id"] == inquiry_id), None)
     if not record: return {"error": "Inquiry not found"}
+    moodboard = json.loads(record.get("moodboard") or "{}")
+    if moodboard.get("status") == "generating":
+        with _moodboard_jobs_lock:
+            active = moodboard.get("job_id") in _moodboard_jobs and _moodboard_jobs[moodboard["job_id"]]["status"] == "generating"
+        if not active:
+            # Worker threads do not survive an app restart. Preserve any finished
+            # tiles, but never leave the project spinning forever.
+            moodboard["status"] = "interrupted"
+            save_moodboard(inquiry_id, moodboard)
+            record["moodboard"] = json.dumps(moodboard)
     record["change_request"] = change_request_summaries([inquiry_id]).get(inquiry_id)
     record["followups"] = list_inquiry_followups(inquiry_id)
     record["timeline"] = inquiry_timeline(inquiry_id)
@@ -646,7 +690,14 @@ def update_production_pack(inquiry_id: int, pack: ProductionPack) -> ProductionP
 
 @app.post("/api/inquiries/{inquiry_id}/client-confirm")
 def client_confirm(inquiry_id: int, decision: ClientDecision) -> dict[str, object]:
-    if not set_client_decision(inquiry_id, "CLIENT_CONFIRMED", decision.note): return {"error": "An approved production pack is required."}
+    if not decision.cancellation_policy_accepted:
+        raise HTTPException(status_code=422, detail="Accept the cancellation policy before confirming this booking.")
+    policy = {
+        "version": "2026-09-v1",
+        "summary": "Cancel 48+ hours before the shoot for no fee. Cancellations 24–48 hours before may incur a 25% fee; cancellations under 24 hours may incur a 50% fee.",
+        "tiers": [{"minimum_notice_hours": 48, "fee_percent": 0}, {"minimum_notice_hours": 24, "fee_percent": 25}, {"minimum_notice_hours": 0, "fee_percent": 50}],
+    }
+    if not set_client_decision(inquiry_id, "CLIENT_CONFIRMED", decision.note, policy): return {"error": "An approved production pack is required."}
     return {"id": inquiry_id, "status": "CLIENT_CONFIRMED"}
 
 @app.post("/api/inquiries/{inquiry_id}/client-change-request")
@@ -692,6 +743,51 @@ def request_schedule_change(inquiry_id: int, change: ScheduleChangeRequest, requ
     add_inquiry_message(inquiry_id, "client", request.state.user["name"], source)
     return {"inquiry_id": inquiry_id, "status": "PENDING", "schedule_change": requested}
 
+@app.post("/api/inquiries/{inquiry_id}/cancellation-request")
+def create_cancellation_request(inquiry_id: int, cancellation: CancellationRequest, request: Request) -> dict:
+    record=next((item for item in list_inquiries() if item["id"]==inquiry_id),None)
+    if not record: raise HTTPException(status_code=404,detail="Inquiry not found.")
+    if request.state.user["user_type"]!="client" or record.get("client_email","").lower()!=request.state.user["email"].lower():
+        raise HTTPException(status_code=403,detail="Only the client who owns this shoot can request cancellation.")
+    inquiry_payload=json.loads(record.get("payload") or "{}")
+    booking_amount=max(0.0,float(inquiry_payload.get("budget") or 0))
+    notice_hours=None
+    if record.get("call_time"):
+        try: notice_hours=(datetime.fromisoformat(record["call_time"])-datetime.now()).total_seconds()/3600
+        except (TypeError,ValueError): pass
+    fee_percent=0 if notice_hours is None or notice_hours>=48 else 25 if notice_hours>=24 else 50
+    suggested_fee=round(booking_amount*fee_percent/100,2)
+    suggested_refund=round(max(booking_amount-suggested_fee,0),2)
+    if not request_cancellation(inquiry_id,cancellation.reason,cancellation.note,suggested_fee,suggested_refund,notice_hours):
+        raise HTTPException(status_code=409,detail="This shoot cannot be cancelled or already has a pending request.")
+    body=f"Cancellation request\nReason: {cancellation.reason}"
+    if cancellation.note and cancellation.note.strip(): body+=f"\nClient note: {cancellation.note.strip()}"
+    add_inquiry_message(inquiry_id,"client",request.state.user["name"],body)
+    return {"inquiry_id":inquiry_id,"status":"PENDING","suggested_fee":suggested_fee,"suggested_refund":suggested_refund,"fee_percent":fee_percent}
+
+@app.post("/api/inquiries/{inquiry_id}/cancellation/{decision}")
+def review_cancellation(inquiry_id: int, decision: str, payload: CancellationDecision, request: Request) -> dict:
+    if request.state.user["user_type"]!="photographer": raise HTTPException(status_code=403,detail="Only a photographer can review cancellation requests.")
+    if decision not in {"approve","keep"}: raise HTTPException(status_code=400,detail="Unknown cancellation decision.")
+    approved=decision=="approve"
+    if not approved and not (payload.message or "").strip():
+        raise HTTPException(status_code=422,detail="Add a short explanation before keeping the booking.")
+    record=next((item for item in list_inquiries() if item["id"]==inquiry_id),None)
+    if not record or record.get("cancellation_status")!="PENDING": raise HTTPException(status_code=409,detail="No pending cancellation request is available.")
+    inquiry_payload=json.loads(record.get("payload") or "{}")
+    booking_amount=max(0.0,float(inquiry_payload.get("budget") or 0))
+    if payload.fee_mode=="WAIVED": fee=0.0
+    elif payload.fee_mode=="CUSTOM":
+        if payload.cancellation_fee is None: raise HTTPException(status_code=422,detail="Enter a custom cancellation fee.")
+        fee=float(payload.cancellation_fee)
+    else: fee=float(record.get("cancellation_fee") or 0)
+    if fee>booking_amount: raise HTTPException(status_code=422,detail="The cancellation fee cannot exceed the booking amount.")
+    refund=round(max(booking_amount-fee,0),2)
+    if not decide_cancellation(inquiry_id,approved,payload.fee_mode,fee,refund): raise HTTPException(status_code=409,detail="No pending cancellation request is available.")
+    default=(f"Your shoot cancellation has been approved. Cancellation fee: ${fee:.2f}. Estimated refund: ${refund:.2f}." if approved else "Your cancellation request was declined. Your shoot remains booked; message your photographer if you would like to discuss it.")
+    add_inquiry_message(inquiry_id,"photographer",request.state.user["name"],(payload.message or '').strip() or default)
+    return {"inquiry_id":inquiry_id,"status":"CANCELLED" if approved else "SCHEDULED","cancellation_fee":fee if approved else None,"estimated_refund":refund if approved else None}
+
 @app.post("/api/inquiries/{inquiry_id}/schedule")
 def schedule_project(inquiry_id: int, schedule: ScheduleRequest) -> dict[str, object]:
     if not schedule_inquiry(inquiry_id, schedule.call_time, schedule.meeting_location):
@@ -714,21 +810,52 @@ def _slots_overlap(start: datetime, end: datetime, busy: list[dict]) -> bool:
             return True
     return False
 
-def _fallback_schedule_slots(record: dict, busy: list[dict]) -> list[dict]:
+def _parse_window(value: str) -> tuple[int, int] | None:
+    match = re.fullmatch(r"\s*(\d{1,2}):(\d{2})\s*[–-]\s*(\d{1,2}):(\d{2})\s*", value or "")
+    if not match: return None
+    start, end = int(match.group(1)) * 60 + int(match.group(2)), int(match.group(3)) * 60 + int(match.group(4))
+    return (start, end) if 0 <= start < end <= 24 * 60 else None
+
+def _fallback_schedule_slots(record: dict, busy: list[dict], preferred_date: datetime | None = None, duration_minutes: int | None = None, windows: list[str] | None = None) -> list[dict]:
     payload = json.loads(record.get("payload") or "{}")
-    preferred = _parse_datetime(payload.get("shoot_date", "")) or datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
-    duration = max(1, min(8, int(payload.get("duration_hours") or 2)))
+    preferred = preferred_date or _parse_datetime(payload.get("shoot_date", "")) or datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+    duration = max(30, min(24 * 60, int(duration_minutes or payload.get("duration_minutes") or 120)))
+    parsed_windows = [_parse_window(item) for item in (windows or payload.get("availability_windows") or [])]
+    parsed_windows = [item for item in parsed_windows if item]
+    if not parsed_windows: parsed_windows = [(9 * 60, 18 * 60)]
     location = payload.get("location") or payload.get("city") or "Location to be confirmed"
     slots: list[dict] = []
-    for day_offset in range(14):
+    for day_offset in range(1 if preferred_date else 14):
         day = preferred + timedelta(days=day_offset)
-        if day.weekday() >= 5: continue
-        for hour in (10, 13, 16):
-            start = day.replace(hour=hour, minute=0)
-            end = start + timedelta(hours=duration)
-            if end.hour > 18 or _slots_overlap(start, end, busy): continue
-            slots.append({"starts_at": start.isoformat(timespec="minutes"), "ends_at": end.isoformat(timespec="minutes"), "location": location, "rationale": "Fits the requested timing and avoids the photographer’s confirmed sessions."})
-            if len(slots) == 3: return slots
+        for window_start, window_end in parsed_windows:
+            for minute in range(window_start, window_end - duration + 1, 30):
+                start = day.replace(hour=minute // 60, minute=minute % 60)
+                end = start + timedelta(minutes=duration)
+                if _slots_overlap(start, end, busy): continue
+                slots.append({"starts_at": start.isoformat(timespec="minutes"), "ends_at": end.isoformat(timespec="minutes"), "location": location, "rationale": "Fits the requested timing and avoids the photographer’s confirmed sessions."})
+                if len(slots) == 3: return slots
+    return slots
+
+def _later_same_day_schedule_slots(record: dict, busy: list[dict], preferred_date: datetime | None, duration_minutes: int | None, windows: list[str] | None) -> list[dict]:
+    """Offer duration-matched alternatives only after the client's last window."""
+    if not preferred_date:
+        return []
+    payload = json.loads(record.get("payload") or "{}")
+    parsed_windows = [window for value in (windows or []) if (window := _parse_window(value))]
+    if not parsed_windows:
+        return []
+    duration = max(30, min(24 * 60, int(duration_minutes or payload.get("duration_minutes") or 120)))
+    first_minute = ((max(end for _, end in parsed_windows) + 29) // 30) * 30
+    location = _inquiry_schedule_location(record)
+    slots = []
+    for minute in range(first_minute, 24 * 60 - duration, 30):
+        start = preferred_date.replace(hour=minute // 60, minute=minute % 60)
+        end = start + timedelta(minutes=duration)
+        if _slots_overlap(start, end, busy):
+            continue
+        slots.append({"starts_at": start.isoformat(timespec="minutes"), "ends_at": end.isoformat(timespec="minutes"), "location": location, "rationale": "Outside your preferred window, later on the same date.", "outside_preferred_window": True})
+        if len(slots) == 3:
+            break
     return slots
 
 def _inquiry_schedule_location(record: dict) -> str:
@@ -743,12 +870,16 @@ def _inquiry_schedule_location(record: dict) -> str:
         return str(record["meeting_location"])
     return "Location to be confirmed with your photographer"
 
-def _valid_suggestions(suggestions: list[dict], busy: list[dict], preferred_date: datetime | None, location: str) -> list[dict]:
+def _valid_suggestions(suggestions: list[dict], busy: list[dict], preferred_date: datetime | None, location: str, duration_minutes: int | None = None, windows: list[str] | None = None) -> list[dict]:
     valid = []
+    expected_duration = max(30, min(24 * 60, int(duration_minutes or 120)))
+    parsed_windows = [window for value in (windows or []) if (window := _parse_window(value))]
     for suggestion in suggestions:
         start, end = _parse_datetime(suggestion.get("starts_at", "")), _parse_datetime(suggestion.get("ends_at", ""))
         if not start or not end or end <= start or _slots_overlap(start, end, busy): continue
+        if int((end - start).total_seconds() // 60) != expected_duration: continue
         if preferred_date and start.date() != preferred_date.date(): continue
+        if parsed_windows and not any(start.hour * 60 + start.minute >= lower and end.date() == start.date() and end.hour * 60 + end.minute <= upper for lower, upper in parsed_windows): continue
         valid.append({"starts_at": start.isoformat(timespec="minutes"), "ends_at": end.isoformat(timespec="minutes"), "location": location, "rationale": "Available on your requested date and clear of the photographer’s existing shoots."})
     return valid[:3]
 
@@ -789,29 +920,56 @@ def get_schedule_recommendations(inquiry_id: int) -> dict:
     # A photographer may intentionally offer alternatives outside the client's
     # preferred date or at a different venue. Those saved options are the
     # source of truth and must be shown to the client unchanged.
+    if request and request.get("suggestions"):
+        inquiry = Inquiry(**json.loads(record["payload"]))
+        expected_duration = max(30, min(24 * 60, int(inquiry.duration_minutes or 120)))
+        request["suggestions"] = [item for item in request["suggestions"] if
+            (_parse_datetime(item.get("ends_at", "")) and _parse_datetime(item.get("starts_at", "")) and
+             int((_parse_datetime(item["ends_at"]) - _parse_datetime(item["starts_at"])).total_seconds() // 60) == expected_duration)]
     return request or {"inquiry_id": inquiry_id, "status": None, "suggestions": []}
 
-@app.post("/api/inquiries/{inquiry_id}/schedule-recommendations")
-def create_schedule_recommendations(inquiry_id: int) -> dict:
-    record = next((item for item in list_inquiries() if item["id"] == inquiry_id), None)
-    if not record: raise HTTPException(status_code=404, detail="Inquiry not found.")
-    if record.get("status") not in {"CLIENT_CONFIRMED", "SCHEDULED"}:
-        raise HTTPException(status_code=409, detail="Confirm the production plan before choosing a shoot time.")
+def _recommend_schedule_for_record(inquiry_id: int, record: dict) -> list[dict]:
     inquiry = Inquiry(**json.loads(record["payload"]))
     photographer_email = inquiry.photographer_email or ""
     busy = [item for item in scheduled_times(photographer_email) if int(item.get("inquiry_id", -1)) != inquiry_id]
-    preferred_date = _parse_datetime(inquiry.shoot_date or "")
+    change = get_change_request(inquiry_id)
+    requested_schedule = (change or {}).get("assessment", {}).get("schedule_change", {}) if change and change.get("status") == "PENDING" else {}
+    preferred_date = _parse_datetime(requested_schedule.get("shoot_date") or inquiry.shoot_date or "")
+    requested_windows = requested_schedule.get("availability_windows") or inquiry.availability_windows
+    if requested_schedule:
+        inquiry = inquiry.model_copy(update={"shoot_date": requested_schedule.get("shoot_date") or inquiry.shoot_date, "availability_windows": requested_windows})
     location = _inquiry_schedule_location(record)
     try:
-        suggestions = _valid_suggestions([item.model_dump() for item in recommend_schedule_slots(inquiry, busy)], busy, preferred_date, location)
+        suggestions = _valid_suggestions([item.model_dump() for item in recommend_schedule_slots(inquiry, busy)], busy, preferred_date, location, inquiry.duration_minutes, requested_windows)
     except Exception:
         suggestions = []
     if len(suggestions) < 3:
         existing = {(item["starts_at"], item["ends_at"]) for item in suggestions}
-        suggestions.extend(item for item in _fallback_schedule_slots(record, busy) if (item["starts_at"], item["ends_at"]) not in existing)
+        suggestions.extend(item for item in _fallback_schedule_slots(record, busy, preferred_date, inquiry.duration_minutes, requested_windows) if (item["starts_at"], item["ends_at"]) not in existing)
     if not suggestions:
-        raise HTTPException(status_code=409, detail="No conflict-free times are available yet. Please contact the photographer.")
-    return save_schedule_suggestions(inquiry_id, photographer_email, suggestions[:3])
+        suggestions = _later_same_day_schedule_slots(record, busy, preferred_date, inquiry.duration_minutes, requested_windows)
+    if not suggestions:
+        raise HTTPException(status_code=409, detail="No conflict-free times are available later on the requested date. Ask the client for another date.")
+    return suggestions[:3]
+
+@app.get("/api/inquiries/{inquiry_id}/schedule-preview")
+def preview_schedule_recommendations(inquiry_id: int, request: Request) -> dict:
+    record = get_inquiry(inquiry_id)
+    if not record: raise HTTPException(status_code=404, detail="Inquiry not found.")
+    inquiry = Inquiry(**json.loads(record["payload"]))
+    user = request.state.user
+    if user["user_type"] != "photographer" or (inquiry.photographer_email or "").lower() != user["email"].lower():
+        raise HTTPException(status_code=403, detail="Only the assigned photographer can preview these times.")
+    return {"suggestions": _recommend_schedule_for_record(inquiry_id, record)}
+
+@app.post("/api/inquiries/{inquiry_id}/schedule-recommendations")
+def create_schedule_recommendations(inquiry_id: int) -> dict:
+    record = get_inquiry(inquiry_id)
+    if not record: raise HTTPException(status_code=404, detail="Inquiry not found.")
+    if record.get("status") not in {"CLIENT_CONFIRMED", "SCHEDULED"}:
+        raise HTTPException(status_code=409, detail="Confirm the production plan before choosing a shoot time.")
+    inquiry = Inquiry(**json.loads(record["payload"]))
+    return save_schedule_suggestions(inquiry_id, inquiry.photographer_email or "", _recommend_schedule_for_record(inquiry_id, record))
 
 
 @app.post("/api/inquiries/{inquiry_id}/schedule-proposals")
@@ -830,12 +988,15 @@ def propose_schedule_times(inquiry_id: int, proposal: ScheduleProposal, photogra
     busy = [item for item in scheduled_times(photographer_email) if int(item.get("inquiry_id", -1)) != inquiry_id]
     suggestions: list[dict] = []
     seen: set[tuple[str, str]] = set()
+    expected_duration = max(30, min(24 * 60, int(inquiry.duration_minutes or 120)))
     for slot in proposal.suggestions:
         start, end = _parse_datetime(slot.starts_at), _parse_datetime(slot.ends_at)
         if not start or not end or end <= start:
             raise HTTPException(status_code=422, detail="Each proposed time needs a valid start and end.")
         if end - start > timedelta(days=1):
             raise HTTPException(status_code=422, detail="A proposed shoot can be up to one day long.")
+        if int((end - start).total_seconds() // 60) != expected_duration:
+            raise HTTPException(status_code=422, detail=f"Each proposed time must be exactly {expected_duration} minutes long.")
         key = (start.isoformat(timespec="minutes"), end.isoformat(timespec="minutes"))
         if key in seen:
             raise HTTPException(status_code=422, detail="Proposed times must be distinct.")
@@ -945,6 +1106,38 @@ def moodboard_job_status(job_id: str):
         }
 
 
+@app.post("/api/inquiries/{inquiry_id}/moodboard/retry")
+def retry_moodboard(inquiry_id: int) -> dict:
+    record = get_inquiry(inquiry_id)
+    if not record:
+        raise HTTPException(status_code=404, detail="Inquiry not found.")
+    saved = json.loads(record.get("moodboard") or "{}")
+    if saved.get("status") == "complete":
+        raise HTTPException(status_code=409, detail="This moodboard is already complete.")
+    with _moodboard_jobs_lock:
+        active = saved.get("job_id") in _moodboard_jobs and _moodboard_jobs[saved["job_id"]]["status"] == "generating"
+    if active:
+        raise HTTPException(status_code=409, detail="Moodboard images are still generating.")
+    plan = saved.get("moodboard")
+    if plan and plan.get("tiles"):
+        moodboard = Moodboard.model_validate(plan)
+    else:
+        # Automatic follow-up processing writes a loading placeholder before
+        # the text agent creates its plan. Recover from the saved brief if that
+        # step was interrupted or failed.
+        brief_data = json.loads(record.get("creative_brief") or "{}")
+        if not brief_data:
+            raise HTTPException(status_code=409, detail="The creative brief is not ready yet. Try again shortly.")
+        try:
+            moodboard = create_moodboard(MoodboardRequest(
+                brief=CreativeBrief.model_validate(brief_data), inquiry_id=inquiry_id,
+            ))
+        except Exception as exc:
+            print(f"[ShotCraft moodboard] Could not rebuild plan for inquiry {inquiry_id}: {exc}")
+            raise HTTPException(status_code=502, detail="Could not rebuild the moodboard plan. Check the server logs and try again.") from exc
+    return {"job_id": _start_moodboard_job(inquiry_id, moodboard)}
+
+
 @app.post("/api/inquiries/{inquiry_id}/moodboard/render", response_model=GeneratedMoodboard)
 def render_saved_moodboard(inquiry_id: int) -> GeneratedMoodboard:
     """Render image references only when the photographer explicitly requests them."""
@@ -983,12 +1176,6 @@ def create_and_generate_moodboard_endpoint(request: MoodboardRequest):
     try:
         moodboard = create_moodboard(request)
         inquiry_id = getattr(request, "inquiry_id", None)
-        if inquiry_id:
-            save_moodboard(inquiry_id, {
-                "moodboard": moodboard.model_dump(),
-                "generated": {"title": moodboard.title, "model_id": "gpt-image-2.5-flare", "tiles": [None] * len(moodboard.tiles)},
-                "status": "generating",
-            })
         job_id = _start_moodboard_job(getattr(request, "inquiry_id", None), moodboard)
     except Exception as exc:
         root = exc

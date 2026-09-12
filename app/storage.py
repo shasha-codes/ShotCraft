@@ -27,6 +27,16 @@ def _ensure_schema(db: sqlite3.Connection) -> None:
     if "call_time" not in columns: db.execute("ALTER TABLE inquiries ADD COLUMN call_time TEXT")
     if "meeting_location" not in columns: db.execute("ALTER TABLE inquiries ADD COLUMN meeting_location TEXT")
     if "creative_brief" not in columns: db.execute("ALTER TABLE inquiries ADD COLUMN creative_brief TEXT")
+    if "cancellation_status" not in columns: db.execute("ALTER TABLE inquiries ADD COLUMN cancellation_status TEXT")
+    if "cancellation_reason" not in columns: db.execute("ALTER TABLE inquiries ADD COLUMN cancellation_reason TEXT")
+    if "cancellation_note" not in columns: db.execute("ALTER TABLE inquiries ADD COLUMN cancellation_note TEXT")
+    if "cancellation_requested_at" not in columns: db.execute("ALTER TABLE inquiries ADD COLUMN cancellation_requested_at TEXT")
+    if "cancellation_policy" not in columns: db.execute("ALTER TABLE inquiries ADD COLUMN cancellation_policy TEXT")
+    if "cancellation_policy_accepted_at" not in columns: db.execute("ALTER TABLE inquiries ADD COLUMN cancellation_policy_accepted_at TEXT")
+    if "cancellation_fee" not in columns: db.execute("ALTER TABLE inquiries ADD COLUMN cancellation_fee REAL")
+    if "cancellation_refund" not in columns: db.execute("ALTER TABLE inquiries ADD COLUMN cancellation_refund REAL")
+    if "cancellation_fee_mode" not in columns: db.execute("ALTER TABLE inquiries ADD COLUMN cancellation_fee_mode TEXT")
+    if "cancellation_reviewed_at" not in columns: db.execute("ALTER TABLE inquiries ADD COLUMN cancellation_reviewed_at TEXT")
     db.execute("""CREATE TABLE IF NOT EXISTS schedule_requests (
         inquiry_id INTEGER PRIMARY KEY,
         photographer_email TEXT NOT NULL,
@@ -216,7 +226,11 @@ def inquiry_timeline(inquiry_id: int) -> list[dict]:
         rows = db.execute("SELECT event_type, created_at, metadata FROM inquiry_events WHERE inquiry_id=?", (inquiry_id,)).fetchall()
         db.commit()
     events = {row["event_type"]: row for row in rows}
-    return [{"type": event_type, "label": label, "completed": event_type in events, "timestamp": events[event_type]["created_at"] if event_type in events else None, "metadata": json.loads(events[event_type]["metadata"] or "{}") if event_type in events else {}} for event_type, label in milestones]
+    timeline = [{"type": event_type, "label": label, "completed": event_type in events, "timestamp": events[event_type]["created_at"] if event_type in events else None, "metadata": json.loads(events[event_type]["metadata"] or "{}") if event_type in events else {}} for event_type, label in milestones]
+    for event_type, label in (("CANCELLATION_REQUESTED", "Cancellation requested"), ("CANCELLATION_DECLINED", "Cancellation declined · booking retained"), ("SHOOT_CANCELLED", "Shoot cancelled")):
+        if event_type in events:
+            timeline.append({"type": event_type, "label": label, "completed": True, "timestamp": events[event_type]["created_at"], "metadata": json.loads(events[event_type]["metadata"] or "{}")})
+    return timeline
 
 def _hash_password(password: str, salt: bytes | None = None) -> str:
     """Use scrypt for new passwords; legacy PBKDF2 hashes are upgraded on login."""
@@ -416,10 +430,13 @@ def approve_production_pack(inquiry_id: int) -> bool:
         db.commit()
         return cur.rowcount > 0
 
-def set_client_decision(inquiry_id: int, status: str, note: str | None = None) -> bool:
+def set_client_decision(inquiry_id: int, status: str, note: str | None = None, cancellation_policy: dict | None = None) -> bool:
     with sqlite3.connect(DB_PATH) as db:
         _ensure_schema(db)
-        cur = db.execute("UPDATE inquiries SET status=?, updated_at=CURRENT_TIMESTAMP WHERE id=? AND production_approved=1", (status, inquiry_id))
+        if status == "CLIENT_CONFIRMED" and cancellation_policy:
+            cur = db.execute("UPDATE inquiries SET status=?, cancellation_policy=?, cancellation_policy_accepted_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP WHERE id=? AND production_approved=1", (status, json.dumps(cancellation_policy), inquiry_id))
+        else:
+            cur = db.execute("UPDATE inquiries SET status=?, updated_at=CURRENT_TIMESTAMP WHERE id=? AND production_approved=1", (status, inquiry_id))
         if cur.rowcount and status == "CLIENT_CONFIRMED": _record_event(db, inquiry_id, "SHOOT_CONFIRMED", {"note": note} if note else None)
         db.commit()
         return cur.rowcount > 0
@@ -439,6 +456,25 @@ def schedule_inquiry(inquiry_id: int, call_time: str, meeting_location: str) -> 
         db.commit()
         return cur.rowcount > 0
 
+def request_cancellation(inquiry_id: int, reason: str, note: str | None, suggested_fee: float, suggested_refund: float, notice_hours: float | None) -> bool:
+    with sqlite3.connect(DB_PATH) as db:
+        _ensure_schema(db)
+        cur=db.execute("""UPDATE inquiries SET cancellation_status='PENDING', cancellation_reason=?, cancellation_note=?, cancellation_requested_at=CURRENT_TIMESTAMP, cancellation_fee=?, cancellation_refund=?, cancellation_fee_mode='POLICY', updated_at=CURRENT_TIMESTAMP WHERE id=? AND status IN ('CLIENT_CONFIRMED','SCHEDULED') AND COALESCE(cancellation_status,'') NOT IN ('PENDING','APPROVED')""",(reason.strip(),(note or '').strip() or None,suggested_fee,suggested_refund,inquiry_id))
+        if cur.rowcount:_record_event(db,inquiry_id,'CANCELLATION_REQUESTED',{'reason':reason,'suggested_fee':suggested_fee,'suggested_refund':suggested_refund,'notice_hours':notice_hours})
+        db.commit();return cur.rowcount>0
+
+def decide_cancellation(inquiry_id: int, approve: bool, fee_mode: str = "POLICY", cancellation_fee: float | None = None, cancellation_refund: float | None = None) -> bool:
+    with sqlite3.connect(DB_PATH) as db:
+        _ensure_schema(db)
+        decision='APPROVED' if approve else 'DECLINED'
+        if approve:
+            cur=db.execute("UPDATE inquiries SET status='CANCELLED', cancellation_status=?, cancellation_fee_mode=?, cancellation_fee=?, cancellation_refund=?, cancellation_reviewed_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP WHERE id=? AND cancellation_status='PENDING'",(decision,fee_mode,cancellation_fee,cancellation_refund,inquiry_id))
+            if cur.rowcount: db.execute("UPDATE schedule_requests SET status='RELEASED', updated_at=CURRENT_TIMESTAMP WHERE inquiry_id=? AND status IN ('CONFIRMED','PENDING_CLIENT','PENDING_PHOTOGRAPHER')",(inquiry_id,))
+        else:
+            cur=db.execute("UPDATE inquiries SET cancellation_status=?, cancellation_reviewed_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP WHERE id=? AND cancellation_status='PENDING'",(decision,inquiry_id))
+        if cur.rowcount:_record_event(db,inquiry_id,'SHOOT_CANCELLED' if approve else 'CANCELLATION_DECLINED',{'fee_mode':fee_mode,'cancellation_fee':cancellation_fee,'refund':cancellation_refund} if approve else None)
+        db.commit();return cur.rowcount>0
+
 def scheduled_times(photographer_email: str) -> list[dict]:
     """Confirmed shoots plus client-selected requests that need photographer review."""
     with sqlite3.connect(DB_PATH) as db:
@@ -446,11 +482,20 @@ def scheduled_times(photographer_email: str) -> list[dict]:
         _ensure_schema(db)
         rows = db.execute("SELECT id, payload, call_time, meeting_location FROM inquiries WHERE status='SCHEDULED'").fetchall()
         pending = db.execute("SELECT inquiry_id, selected_starts_at, selected_ends_at, selected_location FROM schedule_requests WHERE photographer_email=? AND status='PENDING_PHOTOGRAPHER'", (photographer_email.lower(),)).fetchall()
+    def end_for(start_value: str, inquiry_payload: dict) -> str | None:
+        try:
+            start = datetime.fromisoformat(start_value)
+            minutes = int(inquiry_payload.get("duration_minutes") or 120)
+            if minutes < 1: return None
+            return (start + timedelta(minutes=minutes)).isoformat(timespec="minutes")
+        except (TypeError, ValueError, OverflowError):
+            return None
+
     times = []
     for row in rows:
         payload = json.loads(row["payload"] or "{}")
         if (payload.get("photographer_email") or "").lower() == photographer_email.lower() and row["call_time"]:
-            times.append({"inquiry_id": row["id"], "starts_at": row["call_time"], "ends_at": None, "location": row["meeting_location"], "kind": "scheduled"})
+            times.append({"inquiry_id": row["id"], "starts_at": row["call_time"], "ends_at": end_for(row["call_time"], payload), "location": row["meeting_location"], "kind": "scheduled"})
     times.extend({"inquiry_id": row["inquiry_id"], "starts_at": row["selected_starts_at"], "ends_at": row["selected_ends_at"], "location": row["selected_location"], "kind": "pending_confirmation"} for row in pending)
     return times
 
@@ -505,7 +550,7 @@ def confirm_client_schedule_selection(inquiry_id: int, starts_at: str, ends_at: 
             return False
         booked = db.execute(
             """UPDATE inquiries SET status='SCHEDULED', call_time=?, meeting_location=?, updated_at=CURRENT_TIMESTAMP
-               WHERE id=? AND status IN ('CLIENT_CONFIRMED', 'SCHEDULED')""",
+               WHERE id=? AND (status='SCHEDULED' OR (status='CLIENT_CONFIRMED' AND cancellation_policy_accepted_at IS NOT NULL))""",
             (starts_at, location, inquiry_id),
         )
         if not booked.rowcount:
