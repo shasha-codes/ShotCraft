@@ -58,6 +58,15 @@ def _ensure_schema(db: sqlite3.Connection) -> None:
         updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY(inquiry_id) REFERENCES inquiries(id) ON DELETE CASCADE
     )""")
+    change_columns = {row[1] for row in db.execute("PRAGMA table_info(inquiry_change_requests)")}
+    if "history" not in change_columns:
+        db.execute("ALTER TABLE inquiry_change_requests ADD COLUMN history TEXT NOT NULL DEFAULT '[]'")
+    # Reconcile requests created by the previous renderer: once options were
+    # sent, the photographer's review was complete even though the row stayed
+    # marked PENDING.
+    db.execute("""UPDATE inquiry_change_requests SET status='AWAITING_CLIENT', updated_at=CURRENT_TIMESTAMP
+        WHERE status='PENDING' AND json_extract(assessment, '$.schedule_change') IS NOT NULL
+        AND inquiry_id IN (SELECT inquiry_id FROM schedule_requests WHERE status='PENDING_CLIENT')""")
     db.execute("""CREATE TABLE IF NOT EXISTS pre_shoot_checkins (
         inquiry_id INTEGER PRIMARY KEY,
         status TEXT NOT NULL,
@@ -81,6 +90,22 @@ def _ensure_schema(db: sqlite3.Connection) -> None:
     )""")
     db.execute("CREATE INDEX IF NOT EXISTS idx_auth_sessions_user_id ON auth_sessions(user_id)")
     db.execute("CREATE INDEX IF NOT EXISTS idx_auth_sessions_expires_at ON auth_sessions(expires_at)")
+    db.execute("""CREATE TABLE IF NOT EXISTS planning_workflows (
+        inquiry_id INTEGER PRIMARY KEY,
+        stage TEXT NOT NULL,
+        status TEXT NOT NULL,
+        activity TEXT NOT NULL DEFAULT '[]',
+        error TEXT,
+        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY(inquiry_id) REFERENCES inquiries(id) ON DELETE CASCADE
+    )""")
+    db.execute("""CREATE TABLE IF NOT EXISTS cancellation_agent_reviews (
+        inquiry_id INTEGER PRIMARY KEY,
+        status TEXT NOT NULL,
+        review TEXT NOT NULL DEFAULT '{}',
+        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY(inquiry_id) REFERENCES inquiries(id) ON DELETE CASCADE
+    )""")
     db.execute("""CREATE TABLE IF NOT EXISTS client_shoot_ideas (
         client_email TEXT PRIMARY KEY,
         history_signature TEXT NOT NULL,
@@ -125,6 +150,50 @@ def record_event(inquiry_id: int, event_type: str, metadata: dict | None = None)
         _record_event(db, inquiry_id, event_type, metadata)
         db.commit()
 
+def update_planning_workflow(inquiry_id: int, stage: str, status: str, message: str | None = None, error: str | None = None) -> None:
+    """Persist a resumable, user-visible audit trail for the planning agent."""
+    with sqlite3.connect(DB_PATH) as db:
+        db.row_factory = sqlite3.Row
+        _ensure_schema(db)
+        previous = db.execute("SELECT activity FROM planning_workflows WHERE inquiry_id=?", (inquiry_id,)).fetchone()
+        activity = json.loads(previous["activity"] or "[]") if previous else []
+        if message and (not activity or activity[-1].get("message") != message):
+            activity.append({"stage": stage, "status": status, "message": message, "timestamp": datetime.now(timezone.utc).isoformat()})
+        db.execute("""INSERT INTO planning_workflows (inquiry_id, stage, status, activity, error)
+            VALUES (?, ?, ?, ?, ?) ON CONFLICT(inquiry_id) DO UPDATE SET
+            stage=excluded.stage, status=excluded.status, activity=excluded.activity,
+            error=excluded.error, updated_at=CURRENT_TIMESTAMP""",
+            (inquiry_id, stage, status, json.dumps(activity[-20:]), error))
+        db.commit()
+
+def get_planning_workflow(inquiry_id: int) -> dict | None:
+    with sqlite3.connect(DB_PATH) as db:
+        db.row_factory = sqlite3.Row
+        _ensure_schema(db)
+        row = db.execute("SELECT * FROM planning_workflows WHERE inquiry_id=?", (inquiry_id,)).fetchone()
+    if not row:
+        return None
+    result = dict(row)
+    result["activity"] = json.loads(result.get("activity") or "[]")
+    return result
+
+def save_cancellation_agent_review(inquiry_id: int, status: str, review: dict | None = None) -> None:
+    with sqlite3.connect(DB_PATH) as db:
+        _ensure_schema(db)
+        db.execute("""INSERT INTO cancellation_agent_reviews (inquiry_id, status, review) VALUES (?, ?, ?)
+            ON CONFLICT(inquiry_id) DO UPDATE SET status=excluded.status, review=excluded.review, updated_at=CURRENT_TIMESTAMP""",
+            (inquiry_id, status, json.dumps(review or {})))
+        db.commit()
+
+def get_cancellation_agent_review(inquiry_id: int) -> dict | None:
+    with sqlite3.connect(DB_PATH) as db:
+        db.row_factory = sqlite3.Row
+        _ensure_schema(db)
+        row = db.execute("SELECT status, review, updated_at FROM cancellation_agent_reviews WHERE inquiry_id=?", (inquiry_id,)).fetchone()
+    if not row:
+        return None
+    return {"status": row["status"], "review": json.loads(row["review"] or "{}"), "updated_at": row["updated_at"]}
+
 def inquiry_event_flags(inquiry_ids: list[int]) -> dict[int, set[str]]:
     if not inquiry_ids:
         return {}
@@ -139,11 +208,19 @@ def inquiry_event_flags(inquiry_ids: list[int]) -> dict[int, set[str]]:
 
 def save_change_request(inquiry_id: int, source_message: str, assessment: dict) -> None:
     with sqlite3.connect(DB_PATH) as db:
+        db.row_factory = sqlite3.Row
         _ensure_schema(db)
-        db.execute("""INSERT INTO inquiry_change_requests (inquiry_id, source_message, assessment, status)
-            VALUES (?, ?, ?, 'PENDING') ON CONFLICT(inquiry_id) DO UPDATE SET
-            source_message=excluded.source_message, assessment=excluded.assessment, status='PENDING', updated_at=CURRENT_TIMESTAMP""",
-            (inquiry_id, source_message, json.dumps(assessment)))
+        previous = db.execute("SELECT source_message, assessment, status, created_at, updated_at, history FROM inquiry_change_requests WHERE inquiry_id=?", (inquiry_id,)).fetchone()
+        history = json.loads(previous["history"] or "[]") if previous else []
+        if previous:
+            history.append({"source_message": previous["source_message"], "assessment": json.loads(previous["assessment"] or "{}"), "status": previous["status"], "created_at": previous["created_at"], "updated_at": previous["updated_at"]})
+        db.execute("""INSERT INTO inquiry_change_requests (inquiry_id, source_message, assessment, status, history)
+            VALUES (?, ?, ?, 'PENDING', ?) ON CONFLICT(inquiry_id) DO UPDATE SET
+            source_message=excluded.source_message, assessment=excluded.assessment, status='PENDING',
+            history=excluded.history, created_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP""",
+            (inquiry_id, source_message, json.dumps(assessment), json.dumps(history)))
+        if assessment.get("schedule_change"):
+            db.execute("UPDATE schedule_requests SET status='SUPERSEDED', selected_starts_at=NULL, selected_ends_at=NULL, selected_location=NULL, updated_at=CURRENT_TIMESTAMP WHERE inquiry_id=? AND status IN ('PENDING_CLIENT','PENDING_PHOTOGRAPHER')", (inquiry_id,))
         db.commit()
 
 def get_change_request(inquiry_id: int) -> dict | None:
@@ -154,7 +231,22 @@ def get_change_request(inquiry_id: int) -> dict | None:
     if not row: return None
     result = dict(row)
     result["assessment"] = json.loads(result["assessment"] or "{}")
+    result["history"] = json.loads(result.get("history") or "[]")
     return result
+
+def save_schedule_agent_review(inquiry_id: int, review: dict) -> None:
+    """Attach the agent's read-only assessment to the active preference round."""
+    with sqlite3.connect(DB_PATH) as db:
+        _ensure_schema(db)
+        row = db.execute("SELECT assessment FROM inquiry_change_requests WHERE inquiry_id=? AND status='PENDING'", (inquiry_id,)).fetchone()
+        if not row:
+            return
+        assessment = json.loads(row[0] or "{}")
+        if not assessment.get("schedule_change"):
+            return
+        assessment["agent_review"] = review
+        db.execute("UPDATE inquiry_change_requests SET assessment=?, updated_at=CURRENT_TIMESTAMP WHERE inquiry_id=? AND status='PENDING'", (json.dumps(assessment), inquiry_id))
+        db.commit()
 
 def change_request_summaries(inquiry_ids: list[int]) -> dict[int, dict]:
     if not inquiry_ids: return {}
@@ -499,16 +591,21 @@ def scheduled_times(photographer_email: str) -> list[dict]:
     times.extend({"inquiry_id": row["inquiry_id"], "starts_at": row["selected_starts_at"], "ends_at": row["selected_ends_at"], "location": row["selected_location"], "kind": "pending_confirmation"} for row in pending)
     return times
 
-def save_schedule_suggestions(inquiry_id: int, photographer_email: str, suggestions: list[dict]) -> dict:
+def save_schedule_suggestions(inquiry_id: int, photographer_email: str, suggestions: list[dict], status: str = "PENDING_CLIENT") -> dict:
+    if status not in {"PENDING_CLIENT", "PENDING_PHOTOGRAPHER_REVIEW"}:
+        raise ValueError("Unsupported schedule suggestion status")
     with sqlite3.connect(DB_PATH) as db:
         db.row_factory = sqlite3.Row
         _ensure_schema(db)
         db.execute("""INSERT INTO schedule_requests (inquiry_id, photographer_email, suggestions, status)
-            VALUES (?, ?, ?, 'PENDING_CLIENT')
+            VALUES (?, ?, ?, ?)
             ON CONFLICT(inquiry_id) DO UPDATE SET photographer_email=excluded.photographer_email,
               suggestions=excluded.suggestions, selected_starts_at=NULL, selected_ends_at=NULL,
-              selected_location=NULL, status='PENDING_CLIENT', updated_at=CURRENT_TIMESTAMP""",
-            (inquiry_id, photographer_email.lower(), json.dumps(suggestions)))
+              selected_location=NULL, status=excluded.status, updated_at=CURRENT_TIMESTAMP""",
+            (inquiry_id, photographer_email.lower(), json.dumps(suggestions), status))
+        if status == "PENDING_CLIENT":
+            db.execute("""UPDATE inquiry_change_requests SET status='AWAITING_CLIENT', updated_at=CURRENT_TIMESTAMP
+                WHERE inquiry_id=? AND status='PENDING' AND json_extract(assessment, '$.schedule_change') IS NOT NULL""", (inquiry_id,))
         _record_event(db, inquiry_id, "TIME_OPTIONS_PROPOSED", {"count": len(suggestions)})
         db.commit()
     return get_schedule_request(inquiry_id) or {}
@@ -521,6 +618,21 @@ def get_schedule_request(inquiry_id: int) -> dict | None:
     if not row: return None
     result = dict(row)
     result["suggestions"] = json.loads(result.pop("suggestions") or "[]")
+    return result
+
+def schedule_request_summaries(inquiry_ids: list[int]) -> dict[int, dict]:
+    if not inquiry_ids:
+        return {}
+    placeholders = ",".join("?" for _ in inquiry_ids)
+    with sqlite3.connect(DB_PATH) as db:
+        db.row_factory = sqlite3.Row
+        _ensure_schema(db)
+        rows = db.execute(f"SELECT * FROM schedule_requests WHERE inquiry_id IN ({placeholders})", inquiry_ids).fetchall()
+    result = {}
+    for row in rows:
+        item = dict(row)
+        item["suggestions"] = json.loads(item.get("suggestions") or "[]")
+        result[int(item["inquiry_id"])] = item
     return result
 
 def select_schedule_suggestion(inquiry_id: int, starts_at: str, ends_at: str, location: str) -> bool:
@@ -576,6 +688,24 @@ def confirm_schedule_request(inquiry_id: int, photographer_email: str, call_time
 def get_inquiry(inquiry_id: int) -> dict | None:
     rows = [r for r in list_inquiries() if r["id"] == inquiry_id]
     return rows[0] if rows else None
+
+def cancellation_conversation(inquiry_id: int) -> dict:
+    """Find actual messages exchanged since the current cancellation request."""
+    with sqlite3.connect(DB_PATH) as db:
+        db.row_factory = sqlite3.Row
+        _ensure_schema(db)
+        request = db.execute("SELECT cancellation_requested_at FROM inquiries WHERE id=? AND cancellation_status='PENDING'", (inquiry_id,)).fetchone()
+        if not request or not request["cancellation_requested_at"]:
+            return {"photographer_message": None, "client_reply": None}
+        contact = db.execute("""SELECT id, created_at FROM inquiry_messages
+            WHERE inquiry_id=? AND sender_role='photographer' AND created_at>=?
+            ORDER BY id DESC LIMIT 1""", (inquiry_id, request["cancellation_requested_at"])).fetchone()
+        if not contact:
+            return {"photographer_message": None, "client_reply": None}
+        reply = db.execute("""SELECT id, created_at FROM inquiry_messages
+            WHERE inquiry_id=? AND sender_role='client' AND id>?
+            ORDER BY id DESC LIMIT 1""", (inquiry_id, contact["id"])).fetchone()
+        return {"photographer_message": dict(contact), "client_reply": dict(reply) if reply else None}
 
 def list_inquiry_messages(inquiry_id: int, reader_role: str | None = None) -> list[dict]:
     with sqlite3.connect(DB_PATH) as db:

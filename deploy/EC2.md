@@ -55,7 +55,6 @@ SHOTCRAFT_MODEL=openai.gpt-oss-120b-1:0
 SHOTCRAFT_BEDROCK_ENDPOINT=https://bedrock-mantle.us-west-2.api.aws/v1
 OPENAI_API_KEY=replace_with_your_openai_key
 SHOTCRAFT_IMAGE_MODEL=gpt-image-2.5-flare
-PORTRAITPILOT_MOCK_TOOLS=false
 ```
 
 If you are demoing without external image generation, omit `OPENAI_API_KEY` and

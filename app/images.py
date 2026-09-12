@@ -3,17 +3,20 @@
 import base64
 import os
 import re
+import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from openai import OpenAI
+from dotenv import load_dotenv
 
 from .models import Moodboard, GeneratedMoodboard, GeneratedTile
 
+load_dotenv()
 
 MODEL_ID = os.getenv("SHOTCRAFT_IMAGE_MODEL", "gpt-image-2.5-flare")
-MAX_CONCURRENT_RENDERS = max(1, min(int(os.getenv("SHOTCRAFT_IMAGE_CONCURRENCY", "4")), 4))
+MAX_CONCURRENT_RENDERS = max(1, min(int(os.getenv("SHOTCRAFT_IMAGE_CONCURRENCY", "2")), 4))
 OUTPUT_DIR = Path(__file__).resolve().parent.parent / "static" / "generated"
 
 
@@ -21,6 +24,29 @@ def _was_moderation_blocked(exc: Exception) -> bool:
     """Return true for image-provider safety rejections without coupling to an SDK version."""
     message = str(exc).lower()
     return "moderation_blocked" in message or "safety system" in message
+
+
+def _is_transient_provider_error(exc: Exception) -> bool:
+    status = getattr(exc, "status_code", None)
+    message = str(exc).lower()
+    return status in {408, 409, 429} or bool(status and status >= 500) or any(
+        marker in message for marker in ("timeout", "timed out", "rate limit", "connection error", "temporarily unavailable")
+    )
+
+
+def public_image_error(exc: Exception) -> str:
+    """Return an actionable provider error without exposing credentials or request data."""
+    root = exc.__cause__ or exc
+    message = str(root).lower()
+    if "credential" in message or "api_key" in message:
+        return "Image provider credentials are unavailable. Restart the app after checking OPENAI_API_KEY."
+    if getattr(root, "status_code", None) == 429 or "rate limit" in message:
+        return "The image provider is temporarily rate-limited. Wait a moment and retry."
+    if _was_moderation_blocked(root):
+        return "The image provider could not safely render this direction. Adjust the creative brief and retry."
+    if _is_transient_provider_error(root):
+        return "The image provider was temporarily unavailable. Retry the moodboard."
+    return "The image provider could not complete this moodboard. Retry or check the server logs."
 
 
 def _safe_editorial_prompt(role: str, subject: str, tile_prompt: str) -> str:
@@ -71,9 +97,10 @@ def _render_tile(tile, subject: str) -> GeneratedTile:
     # A provider stall must eventually surface as a failed, retryable job.
     client = OpenAI(timeout=120.0, max_retries=0)
     last_error: Exception | None = None
-    # One normal attempt, then one conservative variation only when moderation
-    # rejects the prompt. Retrying ordinary provider failures adds long waits.
-    for attempt_prompt in (prompt, _safe_editorial_prompt(role, subject, tile.visual_prompt)):
+    attempt_prompt = prompt
+    safety_retry_used = False
+    transient_retries = 0
+    while True:
         try:
             result = client.images.generate(model=MODEL_ID, prompt=attempt_prompt, size="1024x1024", quality="low", output_format="jpeg")
             if not result.data or not result.data[0].b64_json:
@@ -84,9 +111,16 @@ def _render_tile(tile, subject: str) -> GeneratedTile:
             return GeneratedTile(title=tile.title, image_url=f"/static/generated/{filename}")
         except Exception as exc:
             last_error = exc
-            if not _was_moderation_blocked(exc):
-                break
-    raise RuntimeError(f"Could not generate the '{tile.title}' reference after two attempts.") from last_error
+            if _was_moderation_blocked(exc) and not safety_retry_used:
+                safety_retry_used = True
+                attempt_prompt = _safe_editorial_prompt(role, subject, tile.visual_prompt)
+                continue
+            if _is_transient_provider_error(exc) and transient_retries < 2:
+                transient_retries += 1
+                time.sleep(1.5 * transient_retries)
+                continue
+            break
+    raise RuntimeError(f"Could not generate the '{tile.title}' reference.") from last_error
 
 
 def generate_moodboard_images(moodboard: Moodboard, on_tile=None) -> GeneratedMoodboard:
