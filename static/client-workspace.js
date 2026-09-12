@@ -66,6 +66,7 @@ const formatDate=value=>{if(!value)return'Flexible date';const date=wallClockDat
 function statusInfo(record){if(record.status==='CANCELLED')return['SHOOT CANCELLED','needs'];if(record.cancellation_status==='PENDING')return['CANCELLATION REQUESTED','needs'];if(record.status==='SCHEDULED')return['SHOOT SCHEDULED','scheduled'];if(record.status==='CLIENT_CONFIRMED')return['CONFIRMED','ready'];if(record.status==='CLIENT_CHANGE_REQUESTED')return['CHANGE REQUESTED','needs'];if(record.production_approved)return['PLAN READY','ready'];if(record.status==='NEEDS_INFORMATION')return['NEEDS YOUR INPUT','needs'];if(record.status==='READY_FOR_REVIEW')return['WITH PHOTOGRAPHER','ready'];return['IN REVIEW','']}
 function clientActionFor(record){
   if(record.status==='CANCELLED'||record.status==='CLIENT_CHANGE_REQUESTED'||record.cancellation_status==='PENDING')return null;
+  if(record.schedule_request?.status==='PENDING_CLIENT'&&['PENDING','AWAITING_CLIENT'].includes(record.change_request?.status))return{label:'Choose a revised time',description:'Your photographer sent conflict-free options for your review.',view:'plan'};
   if(record.status==='NEEDS_INFORMATION')return{label:'Answer follow-up',description:'Your photographer needs a few more details.',view:'followup'};
   if(record.production_approved&&!['CLIENT_CONFIRMED','SCHEDULED'].includes(record.status))return{label:'Review plan and choose a time',description:'Your production plan is ready for your decision.',view:'plan'};
   return null;
@@ -824,7 +825,7 @@ const cinematicPlanWithInlineSchedule=cinematicPlan;
 cinematicPlan=async id=>{
   await cinematicPlanWithInlineSchedule(id);
   const record=await getRecord(id);
-  const pendingReschedule=record.status==='SCHEDULED'&&record.change_request?.status==='PENDING';
+  const pendingReschedule=record.status==='SCHEDULED'&&record.schedule_request?.status==='PENDING_CLIENT'&&['PENDING','AWAITING_CLIENT'].includes(record.change_request?.status);
   if(!record.production_approved||record.status==='CLIENT_CHANGE_REQUESTED'||(record.status==='SCHEDULED'&&!pendingReschedule))return;
   const response=await fetch(`/api/inquiries/${id}/schedule-recommendations`,{cache:'no-store'}),request=response.ok?await response.json():null;
   if(!request?.suggestions?.length||request.status!=='PENDING_CLIENT')return;
@@ -834,7 +835,8 @@ cinematicPlan=async id=>{
   decision.querySelector('.shared-time-summary')?.remove();
   decision.querySelector('[data-confirm-and-choose]')?.remove();
   decision.querySelector('[data-confirm]')?.remove();
-  const panel=`<section class="inline-schedule"><header><b>${pendingReschedule?'Choose your revised time':'Choose your preferred time'}</b><span>${pendingReschedule?'Your current booking remains in place until you confirm one of these new options.':'Select one of the photographer’s available options, then approve your plan.'}</span></header><div class="inline-schedule-options">${request.suggestions.map(slot=>`<button type="button" class="inline-schedule-option" data-inline-time-choice data-start="${esc(slot.starts_at)}" data-end="${esc(slot.ends_at)}" data-location="${esc(slot.location)}"><span><b>${esc(calendarDate(slot.starts_at))}</b><small>${esc(calendarTime(slot.starts_at))} – ${esc(calendarTime(slot.ends_at))}${slot.location?` · ${esc(slot.location)}`:''}</small></span><i>→</i></button>`).join('')}</div><button type="button" class="primary" data-approve-plan-time="${id}">${pendingReschedule?'Confirm revised time →':'Approve plan & selected time →'}</button><p class="inline-schedule-status" id="inlineScheduleStatus">Choose a time to continue.</p></section>`;
+  if(pendingReschedule)decision.querySelector('[data-edit-shoot]')?.remove();
+  const panel=`<section class="inline-schedule"><header><b>${pendingReschedule?'Choose your revised time':'Choose your preferred time'}</b><span>${pendingReschedule?'ShotCraft checked the photographer’s calendar and included a 30-minute buffer. Your current booking stays active until you confirm a new option.':'Select one of the photographer’s available options, then approve your plan.'}</span></header><div class="inline-schedule-options">${request.suggestions.map(slot=>`<button type="button" class="inline-schedule-option" data-inline-time-choice data-start="${esc(slot.starts_at)}" data-end="${esc(slot.ends_at)}" data-location="${esc(slot.location)}"><span><b>${esc(calendarDate(slot.starts_at))}</b><small>${esc(calendarTime(slot.starts_at))} – ${esc(calendarTime(slot.ends_at))}${slot.location?` · ${esc(slot.location)}`:''}</small></span><i>→</i></button>`).join('')}</div><button type="button" class="primary" data-approve-plan-time="${id}">${pendingReschedule?'Confirm revised time →':'Approve plan & selected time →'}</button>${pendingReschedule?`<button type="button" class="secondary" data-edit-shoot="${id}">None work — send new preferences</button>`:''}<p class="inline-schedule-status" id="inlineScheduleStatus">Choose a time to continue.</p></section>`;
   const message=decision.querySelector('button.secondary[type="button"]');
   if(message)message.insertAdjacentHTML('beforebegin',panel);else decision.insertAdjacentHTML('beforeend',panel);
 };

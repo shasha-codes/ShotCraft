@@ -1,5 +1,6 @@
 """Data contracts for the ShotCraft inquiry workflow."""
 
+from typing import Literal
 from pydantic import BaseModel, Field
 
 
@@ -43,6 +44,11 @@ class ScheduleSuggestion(BaseModel):
     location: str = Field(min_length=1)
     rationale: str = Field(min_length=1)
 
+class AgenticScheduleDecision(BaseModel):
+    """A bounded agent decision over deterministic, server-generated slots."""
+    selected_option_ids: list[str] = Field(min_length=1, max_length=3)
+    summary: str = Field(min_length=1, max_length=500)
+
 class ScheduleSelection(BaseModel):
     starts_at: str = Field(min_length=1)
     ends_at: str = Field(min_length=1)
@@ -61,6 +67,11 @@ class CancellationDecision(BaseModel):
     message: str | None = Field(default=None, max_length=1200)
     fee_mode: str = Field(default="POLICY", pattern="^(POLICY|WAIVED|CUSTOM)$")
     cancellation_fee: float | None = Field(default=None, ge=0)
+
+class CancellationAgentDecision(BaseModel):
+    recommended_action: Literal["APPROVE", "DECLINE", "MESSAGE_FIRST"]
+    rationale: str = Field(min_length=12, max_length=600)
+    message_draft: str = Field(min_length=1, max_length=1200)
 
 
 class ScheduleProposal(BaseModel):

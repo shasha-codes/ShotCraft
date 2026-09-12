@@ -153,16 +153,6 @@ Return ONLY valid JSON with this exact shape:
 }
 """.strip()
 
-SCHEDULING_PROMPT = """
-You are ShotCraft's scheduling assistant. Suggest exactly three distinct, client-friendly
-photo-shoot time slots. Each slot MUST have the same duration as the inquiry's
-duration_minutes and MUST fit inside one of the client's availability_windows when
-provided. Respect the client's preferred date, avoid every busy time, use the client's
-requested time windows rather than fixed daytime hours, and never claim a time is
-confirmed. Return ONLY valid JSON:
-{"suggestions":[{"starts_at":"YYYY-MM-DDTHH:MM","ends_at":"YYYY-MM-DDTHH:MM","location":"suggested or supplied location","rationale":"short reason"}]}
-""".strip()
-
 CHANGE_REQUEST_PROMPT = """
 You are ShotCraft's production-change assistant. Assess a client's requested change
 to an existing photography shoot. Use only the inquiry, existing production pack,

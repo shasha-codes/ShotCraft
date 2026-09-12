@@ -8,9 +8,9 @@ from dotenv import load_dotenv
 # Production values still come from the systemd EnvironmentFile on EC2.
 load_dotenv()
 
-from .storage import add_inquiry_message, append_reply, change_request_summaries, confirm_client_schedule_selection, confirm_schedule_request, create_auth_session, get_change_request, get_schedule_request, get_client_shoot_ideas, get_inquiry, get_session_user, inquiry_timeline, list_inquiries, list_inquiry_followups, list_inquiry_messages, list_photographers, message_summaries, pre_shoot_checkin_summaries, record_event, resolve_change_request, revoke_auth_session, save_change_request, save_client_shoot_ideas, save_inquiry, save_pre_shoot_checkin, save_schedule_suggestions, scheduled_times, select_schedule_suggestion, unread_message_counts, update_analysis, update_meeting_location, update_user_profile, create_user, authenticate_user, save_creative_brief, save_moodboard, save_production_pack, approve_production_pack, set_client_decision, schedule_inquiry, request_cancellation, decide_cancellation
+from .storage import add_inquiry_message, append_reply, change_request_summaries, confirm_client_schedule_selection, confirm_schedule_request, create_auth_session, get_cancellation_agent_review, get_change_request, get_schedule_request, get_client_shoot_ideas, get_inquiry, get_planning_workflow, get_session_user, inquiry_timeline, list_inquiries, list_inquiry_followups, list_inquiry_messages, list_photographers, message_summaries, pre_shoot_checkin_summaries, record_event, resolve_change_request, revoke_auth_session, save_cancellation_agent_review, save_change_request, save_client_shoot_ideas, save_inquiry, save_pre_shoot_checkin, save_schedule_agent_review, save_schedule_suggestions, schedule_request_summaries, scheduled_times, select_schedule_suggestion, unread_message_counts, update_analysis, update_meeting_location, update_planning_workflow, update_user_profile, create_user, authenticate_user, save_creative_brief, save_moodboard, save_production_pack, approve_production_pack, set_client_decision, schedule_inquiry, request_cancellation, decide_cancellation
+from .storage import cancellation_conversation
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
 import json
 import hashlib
 import re
@@ -22,8 +22,8 @@ from datetime import datetime, timedelta
 from urllib.parse import urlencode
 from urllib.request import Request as UrlRequest, urlopen
 
-from .agent import analyze_inquiry, assess_change_request, build_production_pack, create_creative_brief, create_moodboard, draft_change_client_update, recommend_next_shoot_ideas, recommend_schedule_slots
-from .images import generate_moodboard_images
+from .agent import analyze_inquiry, assess_change_request, build_production_pack, coordinate_cancellation_review, coordinate_schedule_slots, create_creative_brief, create_moodboard, draft_change_client_update, recommend_next_shoot_ideas
+from .images import generate_moodboard_images, public_image_error
 from .models import (
     BriefRequest,
     CreativeBrief,
@@ -96,6 +96,18 @@ def _start_moodboard_job(inquiry_id: int | None, moodboard: Moodboard) -> str:
             generated = generate_moodboard_images(moodboard, on_tile=on_tile)
             if inquiry_id:
                 save_moodboard(inquiry_id, {"moodboard": moodboard.model_dump(), "generated": generated.model_dump(), "status": "complete", "job_id": job_id})
+                record = get_inquiry(inquiry_id)
+                if record and not record.get("production_pack"):
+                    inquiry = Inquiry(**json.loads(record["payload"]))
+                    update_planning_workflow(inquiry_id, "BUILDING_PLAN", "RUNNING", "Generated and verified all moodboard images")
+                    try:
+                        pack = build_production_pack(inquiry, {"moodboard": moodboard.model_dump()})
+                    except Exception as exc:
+                        print(f"[ShotCraft resumed production pack] Generation failed: {exc}")
+                        pack = _fallback_production_pack(inquiry, {"moodboard": moodboard.model_dump()})
+                    save_production_pack(inquiry_id, pack.model_dump(), draft=True)
+                    record_event(inquiry_id, "DRAFT_PLAN_READY")
+                    update_planning_workflow(inquiry_id, "PHOTOGRAPHER_REVIEW", "WAITING_FOR_PHOTOGRAPHER", "Resumed successfully and prepared an editable production plan")
             with _moodboard_jobs_lock:
                 job = _moodboard_jobs.get(job_id)
                 if job:
@@ -106,13 +118,14 @@ def _start_moodboard_job(inquiry_id: int | None, moodboard: Moodboard) -> str:
                 job = _moodboard_jobs.get(job_id)
                 if job:
                     job["status"] = "failed"
-                    job["error"] = "The image provider could not complete this moodboard."
+                    job["error"] = public_image_error(exc)
             if inquiry_id:
                 save_moodboard(inquiry_id, {
                     "moodboard": moodboard.model_dump(),
                     "generated": {"title": moodboard.title, "model_id": "gpt-image-2.5-flare", "tiles": tiles if 'tiles' in locals() else [None] * len(moodboard.tiles)},
-                    "status": "failed", "job_id": job_id,
+                    "status": "failed", "job_id": job_id, "error": public_image_error(exc),
                 })
+                update_planning_workflow(inquiry_id, "INTERRUPTED", "NEEDS_ATTENTION", "Paused safely so moodboard generation can be retried", str(exc))
 
     threading.Thread(target=run, daemon=True).start()
     return job_id
@@ -358,9 +371,11 @@ def photographer_brief_page(id: int | None = None) -> RedirectResponse:
 
 
 def process_inquiry(inquiry_id: int, inquiry: Inquiry) -> None:
-    """Run intake after the HTTP response and persist the agent result."""
+    """Run the resumable Strands-backed shoot-planning workflow."""
     try:
+        update_planning_workflow(inquiry_id, "ANALYZING", "RUNNING", "Read the inquiry and client follow-up history")
         result = analyze_inquiry(inquiry)
+        update_planning_workflow(inquiry_id, "ANALYZING", "COMPLETE", "Analyzed the shoot requirements with Strands")
         # Deliverable count is required for both pricing and the production brief.
         # Enforce this contract even if the intake model overlooks it.
         if inquiry.deliverable_count is None and "final_image_count" not in result.missing_information:
@@ -368,6 +383,8 @@ def process_inquiry(inquiry_id: int, inquiry: Inquiry) -> None:
             result.questions.append("How many final edited photos would you like delivered?")
         status = "NEEDS_INFORMATION" if result.missing_information else "DRAFTING_PLAN"
         update_analysis(inquiry_id, status, result.model_dump())
+        if result.missing_information:
+            update_planning_workflow(inquiry_id, "NEEDS_DETAILS", "WAITING_FOR_CLIENT", f"Asked {len(result.questions)} targeted follow-up question{'s' if len(result.questions) != 1 else ''}")
         if not result.missing_information:
             # The structured intake supplied the same information that the
             # legacy follow-up step collected, so keep the short journey linear.
@@ -392,8 +409,10 @@ def process_inquiry(inquiry_id: int, inquiry: Inquiry) -> None:
                     "generated": {"title": "Preparing creative direction", "model_id": "gpt-image-2.5-flare", "tiles": [None, None, None, None]},
                     "status": "generating", "job_id": draft_job_id,
                 })
+                update_planning_workflow(inquiry_id, "CREATING_BRIEF", "RUNNING", "Turned the complete inquiry into a structured creative brief")
                 brief = create_creative_brief(BriefRequest(inquiry=inquiry, inquiry_id=inquiry_id))
                 save_creative_brief(inquiry_id, brief.model_dump())
+                update_planning_workflow(inquiry_id, "CREATING_MOODBOARD", "RUNNING", "Planned four visual directions from the approved client facts")
                 moodboard = create_moodboard(MoodboardRequest(brief=brief, inquiry_id=inquiry_id))
                 draft_moodboard = moodboard
                 planned_tiles = moodboard.tiles
@@ -417,6 +436,7 @@ def process_inquiry(inquiry_id: int, inquiry: Inquiry) -> None:
 
                 generated = generate_moodboard_images(moodboard, on_tile=save_completed_tile)
                 save_moodboard(inquiry_id, {"moodboard": moodboard.model_dump(), "generated": generated.model_dump(), "status": "complete", "job_id": draft_job_id})
+                update_planning_workflow(inquiry_id, "BUILDING_PLAN", "RUNNING", "Generated and verified all moodboard images")
                 with _moodboard_jobs_lock:
                     _moodboard_jobs[draft_job_id]["status"] = "complete"
                 try:
@@ -427,6 +447,7 @@ def process_inquiry(inquiry_id: int, inquiry: Inquiry) -> None:
                 save_production_pack(inquiry_id, pack.model_dump(), draft=True)
                 record_event(inquiry_id, "DRAFT_PLAN_READY")
                 update_analysis(inquiry_id, "READY_FOR_REVIEW", result.model_dump())
+                update_planning_workflow(inquiry_id, "PHOTOGRAPHER_REVIEW", "WAITING_FOR_PHOTOGRAPHER", "Prepared an editable production plan for photographer review")
             except Exception as exc:
                 # Keep the request available to the photographer, but never mark
                 # the production plan as drafted without its image references.
@@ -434,18 +455,20 @@ def process_inquiry(inquiry_id: int, inquiry: Inquiry) -> None:
                     job = _moodboard_jobs[draft_job_id]
                     if job["status"] == "generating":
                         job["status"] = "failed"
-                        job["error"] = "The moodboard could not be prepared."
+                        job["error"] = public_image_error(exc) if draft_moodboard else "The moodboard plan could not be prepared."
                         title = draft_moodboard.title if draft_moodboard else "Preparing creative direction"
                         save_moodboard(inquiry_id, {
                             "moodboard": draft_moodboard.model_dump() if draft_moodboard else {"title": title, "tiles": []},
                             "generated": {"title": title, "model_id": "gpt-image-2.5-flare", "tiles": partial_tiles},
-                            "status": "failed", "job_id": draft_job_id,
+                            "status": "failed", "job_id": draft_job_id, "error": job["error"],
                         })
                 update_analysis(inquiry_id, "READY_FOR_REVIEW", result.model_dump())
+                update_planning_workflow(inquiry_id, "INTERRUPTED", "NEEDS_ATTENTION", "Paused safely so moodboard generation can be retried", str(exc))
                 print(f"[ShotCraft draft plan] Generation failed for inquiry {inquiry_id}: {exc}")
         print(f"[ShotCraft notification] Inquiry {inquiry_id}: {status}")
     except Exception as exc:
         update_analysis(inquiry_id, "PROCESSING_ERROR", {"error": str(exc)})
+        update_planning_workflow(inquiry_id, "INTERRUPTED", "NEEDS_ATTENTION", "The planning workflow stopped and can be resumed", str(exc))
         print(f"[ShotCraft notification] Inquiry {inquiry_id} failed: {exc}")
 
 @app.post("/api/inquiries")
@@ -487,10 +510,13 @@ def get_inquiries(request: Request, client_email: str | None = None, photographe
         for item in inquiries:
             item["unread_messages"] = counts.get(int(item["id"]), 0)
             item.update(summaries.get(int(item["id"]), {"message_count": 0, "latest_message": None}))
-    changes = change_request_summaries([int(item["id"]) for item in inquiries])
+    inquiry_ids = [int(item["id"]) for item in inquiries]
+    changes = change_request_summaries(inquiry_ids)
+    schedule_requests = schedule_request_summaries(inquiry_ids)
     checkins = pre_shoot_checkin_summaries([int(item["id"]) for item in inquiries])
     for item in inquiries:
         item["change_request"] = changes.get(int(item["id"]))
+        item["schedule_request"] = schedule_requests.get(int(item["id"]))
         item["pre_shoot_checkin"] = checkins.get(int(item["id"]))
     return inquiries
 
@@ -540,9 +566,12 @@ def get_inquiry_detail(inquiry_id: int) -> dict:
             save_moodboard(inquiry_id, moodboard)
             record["moodboard"] = json.dumps(moodboard)
     record["change_request"] = change_request_summaries([inquiry_id]).get(inquiry_id)
+    record["schedule_request"] = schedule_request_summaries([inquiry_id]).get(inquiry_id)
     record["followups"] = list_inquiry_followups(inquiry_id)
     record["timeline"] = inquiry_timeline(inquiry_id)
     record["pre_shoot_checkin"] = pre_shoot_checkin_summaries([inquiry_id]).get(inquiry_id)
+    record["planning_workflow"] = get_planning_workflow(inquiry_id)
+    record["cancellation_conversation"] = cancellation_conversation(inquiry_id) if record.get("cancellation_status") == "PENDING" else None
     return record
 
 @app.get("/api/inquiries/{inquiry_id}/timeline")
@@ -597,6 +626,13 @@ def post_inquiry_message(inquiry_id: int, message: InquiryMessageCreate, backgro
     created = add_inquiry_message(inquiry_id, message.sender_role, message.sender_name, message.body)
     if not created:
         raise HTTPException(status_code=404, detail="Inquiry not found.")
+    record = get_inquiry(inquiry_id)
+    if record and record.get("cancellation_status") == "PENDING":
+        conversation = cancellation_conversation(inquiry_id)
+        if message.sender_role == "photographer":
+            update_planning_workflow(inquiry_id, "CANCELLATION_CONTACTED", "WAITING_FOR_CLIENT", "Photographer messaged the client; cancellation remains pending and the booking stays scheduled")
+        elif message.sender_role == "client" and conversation["client_reply"]:
+            update_planning_workflow(inquiry_id, "CANCELLATION_CLIENT_REPLIED", "WAITING_FOR_PHOTOGRAPHER", "Client replied; photographer can continue the conversation or approve or decline cancellation")
     change_terms = ("change", "move", "reschedule", "location", "venue", "indoor", "outdoor", "time", "date", "wardrobe", "outfit", "deliverable")
     pending_change = get_change_request(inquiry_id)
     if message.sender_role == "client" and ((pending_change and pending_change.get("status") == "PENDING") or any(term in message.body.lower() for term in change_terms)):
@@ -676,6 +712,7 @@ def reply_to_inquiry(inquiry_id: int, reply: InquiryReply, background_tasks: Bac
 def approve_production(inquiry_id: int) -> dict[str, object]:
     if not approve_production_pack(inquiry_id):
         return {"error": "Production pack not found."}
+    update_planning_workflow(inquiry_id, "CHECKING_AVAILABILITY", "RUNNING", "Photographer approved the creative plan; checking booking availability")
     return {"id": inquiry_id, "production_approved": True, "message": "Production pack approved."}
 
 @app.put("/api/inquiries/{inquiry_id}/production-pack", response_model=ProductionPack)
@@ -740,11 +777,56 @@ def request_schedule_change(inquiry_id: int, change: ScheduleChangeRequest, requ
         source += f"\nClient note: {change.note.strip()}"
     assessment = {"request_summary":"Client requested a new shoot date or preferred time window.","impacts":["The confirmed booking remains unchanged until the photographer proposes and the client selects a new time."],"proposed_updates":{},"decision":"REVIEW","decision_reason":"A confirmed date or time needs photographer approval.","missing_information":[],"confirmed_meeting_location":None,"schedule_change":requested}
     save_change_request(inquiry_id, source, assessment)
+    update_planning_workflow(inquiry_id, "REVIEWING_TIME_CHANGE", "RUNNING", "Client sent new date and time preferences; the current booking remains confirmed")
+    try:
+        recommendation = _schedule_recommendation_result(inquiry_id, record)
+        suggestions = recommendation["suggestions"]
+        save_schedule_suggestions(
+            inquiry_id,
+            json.loads(record.get("payload") or "{}").get("photographer_email") or "",
+            suggestions,
+            status="PENDING_PHOTOGRAPHER_REVIEW",
+        )
+        save_schedule_agent_review(inquiry_id, {"summary": recommendation["summary"], "activity": recommendation["agent_activity"], "agent_used_tools": recommendation["agent_used_tools"], "suggestion_count": len(suggestions), "suggestions": suggestions})
+        update_planning_workflow(inquiry_id, "PHOTOGRAPHER_REVIEW", "WAITING_FOR_PHOTOGRAPHER", f"Reviewed the time change and prepared {len(suggestions)} conflict-free alternative{'s' if len(suggestions) != 1 else ''}")
+    except HTTPException as exc:
+        suggestions = []
+        save_schedule_agent_review(inquiry_id, {"summary": exc.detail, "activity": ["Checked requested duration, preferred windows, and confirmed bookings"], "agent_used_tools": False, "suggestion_count": 0})
+        update_planning_workflow(inquiry_id, "PHOTOGRAPHER_REVIEW", "WAITING_FOR_PHOTOGRAPHER", "No safe time on the requested date; ask the client for another date")
     add_inquiry_message(inquiry_id, "client", request.state.user["name"], source)
-    return {"inquiry_id": inquiry_id, "status": "PENDING", "schedule_change": requested}
+    return {"inquiry_id": inquiry_id, "status": "PENDING", "schedule_change": requested, "suggestion_count": len(suggestions)}
+
+def run_cancellation_agent_review(inquiry_id: int) -> None:
+    """Prepare a read-only Strands review after the client request has been saved."""
+    record = get_inquiry(inquiry_id)
+    if not record or record.get("cancellation_status") != "PENDING":
+        return
+    inquiry = json.loads(record.get("payload") or "{}")
+    amount = max(0.0, float(inquiry.get("budget") or 0))
+    fee = float(record.get("cancellation_fee") or 0)
+    timeline = inquiry_timeline(inquiry_id)
+    request_event = next((item for item in timeline if item["type"] == "CANCELLATION_REQUESTED"), None)
+    notice_hours = (request_event or {}).get("metadata", {}).get("notice_hours")
+    policy = json.loads(record.get("cancellation_policy") or "{}")
+    try:
+        review = coordinate_cancellation_review(
+            inquiry_id,
+            get_booking=lambda: {"call_time": record.get("call_time"), "location": record.get("meeting_location"), "duration_minutes": inquiry.get("duration_minutes"), "booking_amount": amount, "status": record.get("status")},
+            get_policy=lambda: {"accepted_policy": policy, "accepted_at": record.get("cancellation_policy_accepted_at"), "notice_hours_at_request": notice_hours, "policy_fee": fee, "estimated_refund": float(record.get("cancellation_refund") or 0)},
+            get_request=lambda: {"reason": record.get("cancellation_reason"), "note": record.get("cancellation_note"), "requested_at": record.get("cancellation_requested_at")},
+            get_history=lambda: [{"milestone": item["label"], "timestamp": item["timestamp"]} for item in timeline if item.get("completed")][-8:],
+        )
+        if (get_inquiry(inquiry_id) or {}).get("cancellation_status") == "PENDING":
+            save_cancellation_agent_review(inquiry_id, "COMPLETE", review)
+            update_planning_workflow(inquiry_id, "CANCELLATION_REVIEW", "WAITING_FOR_PHOTOGRAPHER", "Reviewed the cancellation reason, accepted policy, fee estimate, and booking history")
+    except Exception as exc:
+        print(f"[ShotCraft cancellation review] Inquiry {inquiry_id}: {exc}")
+        if (get_inquiry(inquiry_id) or {}).get("cancellation_status") == "PENDING":
+            save_cancellation_agent_review(inquiry_id, "UNAVAILABLE", {"activity": ["Policy fee and refund were calculated from the accepted booking terms"], "summary": "Agent review is unavailable. Review the request and policy details before deciding."})
+            update_planning_workflow(inquiry_id, "CANCELLATION_REVIEW", "WAITING_FOR_PHOTOGRAPHER", "Cancellation request is ready for photographer review")
 
 @app.post("/api/inquiries/{inquiry_id}/cancellation-request")
-def create_cancellation_request(inquiry_id: int, cancellation: CancellationRequest, request: Request) -> dict:
+def create_cancellation_request(inquiry_id: int, cancellation: CancellationRequest, request: Request, background_tasks: BackgroundTasks) -> dict:
     record=next((item for item in list_inquiries() if item["id"]==inquiry_id),None)
     if not record: raise HTTPException(status_code=404,detail="Inquiry not found.")
     if request.state.user["user_type"]!="client" or record.get("client_email","").lower()!=request.state.user["email"].lower():
@@ -763,7 +845,21 @@ def create_cancellation_request(inquiry_id: int, cancellation: CancellationReque
     body=f"Cancellation request\nReason: {cancellation.reason}"
     if cancellation.note and cancellation.note.strip(): body+=f"\nClient note: {cancellation.note.strip()}"
     add_inquiry_message(inquiry_id,"client",request.state.user["name"],body)
+    save_cancellation_agent_review(inquiry_id, "RUNNING")
+    update_planning_workflow(inquiry_id, "CANCELLATION_REVIEW", "RUNNING", "Client requested cancellation; reviewing the booking and accepted policy")
+    background_tasks.add_task(run_cancellation_agent_review, inquiry_id)
     return {"inquiry_id":inquiry_id,"status":"PENDING","suggested_fee":suggested_fee,"suggested_refund":suggested_refund,"fee_percent":fee_percent}
+
+@app.get("/api/inquiries/{inquiry_id}/cancellation/agent-review")
+def cancellation_agent_review(inquiry_id: int, request: Request) -> dict:
+    record = get_inquiry(inquiry_id)
+    if not record:
+        raise HTTPException(status_code=404, detail="Inquiry not found.")
+    photographer = json.loads(record.get("payload") or "{}").get("photographer_email") or ""
+    user = request.state.user
+    if user["user_type"] != "photographer" or photographer.lower() != user["email"].lower():
+        raise HTTPException(status_code=403, detail="Only the assigned photographer can review this cancellation.")
+    return get_cancellation_agent_review(inquiry_id) or {"status": "UNAVAILABLE", "review": {}}
 
 @app.post("/api/inquiries/{inquiry_id}/cancellation/{decision}")
 def review_cancellation(inquiry_id: int, decision: str, payload: CancellationDecision, request: Request) -> dict:
@@ -775,6 +871,8 @@ def review_cancellation(inquiry_id: int, decision: str, payload: CancellationDec
     record=next((item for item in list_inquiries() if item["id"]==inquiry_id),None)
     if not record or record.get("cancellation_status")!="PENDING": raise HTTPException(status_code=409,detail="No pending cancellation request is available.")
     inquiry_payload=json.loads(record.get("payload") or "{}")
+    if (inquiry_payload.get("photographer_email") or "").lower() != request.state.user["email"].lower():
+        raise HTTPException(status_code=403, detail="Only the assigned photographer can decide this cancellation.")
     booking_amount=max(0.0,float(inquiry_payload.get("budget") or 0))
     if payload.fee_mode=="WAIVED": fee=0.0
     elif payload.fee_mode=="CUSTOM":
@@ -784,6 +882,7 @@ def review_cancellation(inquiry_id: int, decision: str, payload: CancellationDec
     if fee>booking_amount: raise HTTPException(status_code=422,detail="The cancellation fee cannot exceed the booking amount.")
     refund=round(max(booking_amount-fee,0),2)
     if not decide_cancellation(inquiry_id,approved,payload.fee_mode,fee,refund): raise HTTPException(status_code=409,detail="No pending cancellation request is available.")
+    update_planning_workflow(inquiry_id, "CANCELLED" if approved else "BOOKING_RETAINED", "COMPLETE", "Photographer approved cancellation and released the calendar booking" if approved else "Photographer declined cancellation and kept the confirmed booking")
     default=(f"Your shoot cancellation has been approved. Cancellation fee: ${fee:.2f}. Estimated refund: ${refund:.2f}." if approved else "Your cancellation request was declined. Your shoot remains booked; message your photographer if you would like to discuss it.")
     add_inquiry_message(inquiry_id,"photographer",request.state.user["name"],(payload.message or '').strip() or default)
     return {"inquiry_id":inquiry_id,"status":"CANCELLED" if approved else "SCHEDULED","cancellation_fee":fee if approved else None,"estimated_refund":refund if approved else None}
@@ -802,11 +901,14 @@ def _parse_datetime(value: str) -> datetime | None:
     except (TypeError, ValueError):
         return None
 
-def _slots_overlap(start: datetime, end: datetime, busy: list[dict]) -> bool:
+SCHEDULE_BUFFER_MINUTES = 30
+
+def _slots_overlap(start: datetime, end: datetime, busy: list[dict], buffer_minutes: int = SCHEDULE_BUFFER_MINUTES) -> bool:
+    buffer = timedelta(minutes=max(0, buffer_minutes))
     for item in busy:
         busy_start = _parse_datetime(item.get("starts_at", ""))
         busy_end = _parse_datetime(item.get("ends_at", "")) or (busy_start + timedelta(hours=2) if busy_start else None)
-        if busy_start and busy_end and start < busy_end and end > busy_start:
+        if busy_start and busy_end and start < busy_end + buffer and end > busy_start - buffer:
             return True
     return False
 
@@ -831,7 +933,7 @@ def _fallback_schedule_slots(record: dict, busy: list[dict], preferred_date: dat
             for minute in range(window_start, window_end - duration + 1, 30):
                 start = day.replace(hour=minute // 60, minute=minute % 60)
                 end = start + timedelta(minutes=duration)
-                if _slots_overlap(start, end, busy): continue
+                if _slots_overlap(start, end, busy) or any(start < _parse_datetime(slot["ends_at"]) and end > _parse_datetime(slot["starts_at"]) for slot in slots): continue
                 slots.append({"starts_at": start.isoformat(timespec="minutes"), "ends_at": end.isoformat(timespec="minutes"), "location": location, "rationale": "Fits the requested timing and avoids the photographer’s confirmed sessions."})
                 if len(slots) == 3: return slots
     return slots
@@ -851,7 +953,7 @@ def _later_same_day_schedule_slots(record: dict, busy: list[dict], preferred_dat
     for minute in range(first_minute, 24 * 60 - duration, 30):
         start = preferred_date.replace(hour=minute // 60, minute=minute % 60)
         end = start + timedelta(minutes=duration)
-        if _slots_overlap(start, end, busy):
+        if _slots_overlap(start, end, busy) or any(start < _parse_datetime(slot["ends_at"]) and end > _parse_datetime(slot["starts_at"]) for slot in slots):
             continue
         slots.append({"starts_at": start.isoformat(timespec="minutes"), "ends_at": end.isoformat(timespec="minutes"), "location": location, "rationale": "Outside your preferred window, later on the same date.", "outside_preferred_window": True})
         if len(slots) == 3:
@@ -928,29 +1030,66 @@ def get_schedule_recommendations(inquiry_id: int) -> dict:
              int((_parse_datetime(item["ends_at"]) - _parse_datetime(item["starts_at"])).total_seconds() // 60) == expected_duration)]
     return request or {"inquiry_id": inquiry_id, "status": None, "suggestions": []}
 
-def _recommend_schedule_for_record(inquiry_id: int, record: dict) -> list[dict]:
+def _schedule_recommendation_result(inquiry_id: int, record: dict) -> dict:
     inquiry = Inquiry(**json.loads(record["payload"]))
     photographer_email = inquiry.photographer_email or ""
     busy = [item for item in scheduled_times(photographer_email) if int(item.get("inquiry_id", -1)) != inquiry_id]
     change = get_change_request(inquiry_id)
-    requested_schedule = (change or {}).get("assessment", {}).get("schedule_change", {}) if change and change.get("status") == "PENDING" else {}
+    requested_schedule = (change or {}).get("assessment", {}).get("schedule_change", {}) if change and change.get("status") in {"PENDING", "AWAITING_CLIENT"} else {}
+    rescheduling = bool(requested_schedule and record.get("call_time"))
     preferred_date = _parse_datetime(requested_schedule.get("shoot_date") or inquiry.shoot_date or "")
     requested_windows = requested_schedule.get("availability_windows") or inquiry.availability_windows
     if requested_schedule:
         inquiry = inquiry.model_copy(update={"shoot_date": requested_schedule.get("shoot_date") or inquiry.shoot_date, "availability_windows": requested_windows})
     location = _inquiry_schedule_location(record)
+    preferred = _fallback_schedule_slots(record, busy, preferred_date, inquiry.duration_minutes, requested_windows)
+    later = [] if preferred else _later_same_day_schedule_slots(record, busy, preferred_date, inquiry.duration_minutes, requested_windows)
+    safe_options = preferred or later
+    if not safe_options:
+        raise HTTPException(status_code=409, detail="No duration-matched times are available on the requested date after applying the 30-minute booking buffer. Ask the client for another date.")
+    option_prefix = "preferred" if preferred else "later"
+    available_scope = "preferred_window" if preferred else "later_same_day"
+    identified = [{**slot, "option_id": f"{option_prefix}-{index + 1}"} for index, slot in enumerate(safe_options[:3])]
+    activity: list[str] = []
     try:
-        suggestions = _valid_suggestions([item.model_dump() for item in recommend_schedule_slots(inquiry, busy)], busy, preferred_date, location, inquiry.duration_minutes, requested_windows)
-    except Exception:
-        suggestions = []
-    if len(suggestions) < 3:
-        existing = {(item["starts_at"], item["ends_at"]) for item in suggestions}
-        suggestions.extend(item for item in _fallback_schedule_slots(record, busy, preferred_date, inquiry.duration_minutes, requested_windows) if (item["starts_at"], item["ends_at"]) not in existing)
-    if not suggestions:
-        suggestions = _later_same_day_schedule_slots(record, busy, preferred_date, inquiry.duration_minutes, requested_windows)
-    if not suggestions:
-        raise HTTPException(status_code=409, detail="No conflict-free times are available later on the requested date. Ask the client for another date.")
-    return suggestions[:3]
+        coordination = coordinate_schedule_slots(
+            inquiry_id,
+            get_context=lambda: {
+                "inquiry_id": inquiry_id,
+                "shoot_date": inquiry.shoot_date,
+                "availability_windows": requested_windows,
+                "duration_minutes": inquiry.duration_minutes or 120,
+                "location": location,
+                "buffer_minutes": SCHEDULE_BUFFER_MINUTES,
+            },
+            get_bookings=lambda: busy,
+            find_slots=lambda scope: identified if scope == available_scope else [],
+            **({"get_change_history": lambda: {
+                "current_booking": {"starts_at": record["call_time"], "location": record.get("meeting_location")},
+                "previous_rounds": [{"client_request": item.get("source_message"), "status": item.get("status"), "offered_times": [slot.get("starts_at") for slot in item.get("assessment", {}).get("agent_review", {}).get("suggestions", [])]} for item in (change.get("history") or [])][-5:],
+                "client_note": change.get("source_message"),
+            }} if rescheduling else {}),
+        )
+        by_id = {slot["option_id"]: slot for slot in identified}
+        selected = [by_id[option_id] for option_id in coordination["decision"]["selected_option_ids"] if option_id in by_id]
+        if selected:
+            identified = selected
+        activity = coordination["activity"]
+    except Exception as exc:
+        activity = [
+            f"Read shoot context for inquiry {inquiry_id}",
+            f"Checked {len(busy)} confirmed booking{'s' if len(busy) != 1 else ''}",
+            f"Generated {len(identified)} deterministic conflict-free option{'s' if len(identified) != 1 else ''}",
+            f"Agent ranking unavailable ({type(exc).__name__}); preserved validated order",
+        ]
+    suggestions = [{key: value for key, value in slot.items() if key != "option_id"} for slot in identified[:3]]
+    used_tools = bool(activity and activity[-1] == "Ranked safe options for photographer review")
+    summary = coordination["decision"]["summary"] if used_tools else "Calendar-checked options are ready for photographer review."
+    return {"suggestions": suggestions, "summary": summary, "agent_activity": activity, "agent_used_tools": used_tools}
+
+def _recommend_schedule_for_record(inquiry_id: int, record: dict) -> list[dict]:
+    """Compatibility wrapper for callers that only need validated suggestions."""
+    return _schedule_recommendation_result(inquiry_id, record)["suggestions"]
 
 @app.get("/api/inquiries/{inquiry_id}/schedule-preview")
 def preview_schedule_recommendations(inquiry_id: int, request: Request) -> dict:
@@ -960,7 +1099,13 @@ def preview_schedule_recommendations(inquiry_id: int, request: Request) -> dict:
     user = request.state.user
     if user["user_type"] != "photographer" or (inquiry.photographer_email or "").lower() != user["email"].lower():
         raise HTTPException(status_code=403, detail="Only the assigned photographer can preview these times.")
-    return {"suggestions": _recommend_schedule_for_record(inquiry_id, record)}
+    existing = get_schedule_request(inquiry_id)
+    if existing and existing.get("status") == "PENDING_PHOTOGRAPHER_REVIEW" and existing.get("suggestions"):
+        review = (get_change_request(inquiry_id) or {}).get("assessment", {}).get("agent_review", {})
+        return {"suggestions": existing["suggestions"], "summary": review.get("summary", ""), "agent_activity": review.get("activity", []), "agent_used_tools": review.get("agent_used_tools", False)}
+    result = _schedule_recommendation_result(inquiry_id, record)
+    update_planning_workflow(inquiry_id, "PHOTOGRAPHER_REVIEW", "WAITING_FOR_PHOTOGRAPHER", f"Checked confirmed bookings and prepared {len(result['suggestions'])} safe time option{'s' if len(result['suggestions']) != 1 else ''}")
+    return result
 
 @app.post("/api/inquiries/{inquiry_id}/schedule-recommendations")
 def create_schedule_recommendations(inquiry_id: int) -> dict:
@@ -979,7 +1124,7 @@ def propose_schedule_times(inquiry_id: int, proposal: ScheduleProposal, photogra
     if not record:
         raise HTTPException(status_code=404, detail="Inquiry not found.")
     inquiry = Inquiry(**json.loads(record["payload"]))
-    pending_schedule_change = (get_change_request(inquiry_id) or {}).get("status") == "PENDING"
+    pending_schedule_change = (get_change_request(inquiry_id) or {}).get("status") in {"PENDING", "AWAITING_CLIENT"}
     if not record.get("production_approved") or record.get("status") == "CLIENT_CHANGE_REQUESTED" or (record.get("status") == "SCHEDULED" and not pending_schedule_change):
         raise HTTPException(status_code=409, detail="Share an active production plan before proposing times.")
     if not inquiry.photographer_email or inquiry.photographer_email.lower() != photographer_email.lower():
@@ -1021,10 +1166,16 @@ def propose_schedule_times(inquiry_id: int, proposal: ScheduleProposal, photogra
         "ShotCraft scheduling",
         f"Your photographer proposed revised shoot times: {option_summary}. Open your shoot to review and choose the option that works best for you.",
     )
+    update_planning_workflow(inquiry_id, "CLIENT_REVIEW", "WAITING_FOR_CLIENT", f"Photographer shared {len(suggestions)} time option{'s' if len(suggestions) != 1 else ''} with the client")
     return saved
 
 @app.post("/api/inquiries/{inquiry_id}/schedule-selection")
-def select_schedule_time(inquiry_id: int, selection: ScheduleSelection) -> dict:
+def select_schedule_time(inquiry_id: int, selection: ScheduleSelection, request: Request) -> dict:
+    record = get_inquiry(inquiry_id)
+    if not record:
+        raise HTTPException(status_code=404, detail="Inquiry not found.")
+    if request.state.user["user_type"] != "client" or record.get("client_email", "").lower() != request.state.user["email"].lower():
+        raise HTTPException(status_code=403, detail="Only the client who owns this shoot can choose a revised time.")
     request = get_schedule_request(inquiry_id)
     if not request: raise HTTPException(status_code=409, detail="Get recommended times before making a selection.")
     matches = any(item["starts_at"] == selection.starts_at and item["ends_at"] == selection.ends_at for item in request["suggestions"])
@@ -1032,10 +1183,12 @@ def select_schedule_time(inquiry_id: int, selection: ScheduleSelection) -> dict:
     busy = [item for item in scheduled_times(request["photographer_email"]) if int(item.get("inquiry_id", -1)) != inquiry_id]
     start, end = _parse_datetime(selection.starts_at), _parse_datetime(selection.ends_at)
     if not start or not end or _slots_overlap(start, end, busy):
-        raise HTTPException(status_code=409, detail="This time is no longer available. Please choose another option.")
+        raise HTTPException(status_code=409, detail="This time is no longer available after the required 30-minute booking buffer. Send updated preferences to continue.")
     if not confirm_client_schedule_selection(inquiry_id, selection.starts_at, selection.ends_at, selection.location):
         raise HTTPException(status_code=409, detail="This time is no longer available for selection.")
-    if (get_change_request(inquiry_id) or {}).get("status") == "PENDING":
+    is_time_change = (get_change_request(inquiry_id) or {}).get("status") in {"PENDING", "AWAITING_CLIENT"}
+    update_planning_workflow(inquiry_id, "CONFIRMED", "COMPLETE", "Revalidated availability and updated the booking to the client's selected time" if is_time_change else "Revalidated availability and confirmed the client's selected time")
+    if is_time_change:
         resolve_change_request(inquiry_id)
     add_inquiry_message(
         inquiry_id,
@@ -1135,6 +1288,7 @@ def retry_moodboard(inquiry_id: int) -> dict:
         except Exception as exc:
             print(f"[ShotCraft moodboard] Could not rebuild plan for inquiry {inquiry_id}: {exc}")
             raise HTTPException(status_code=502, detail="Could not rebuild the moodboard plan. Check the server logs and try again.") from exc
+    update_planning_workflow(inquiry_id, "CREATING_MOODBOARD", "RUNNING", "Resumed moodboard generation from the saved creative brief")
     return {"job_id": _start_moodboard_job(inquiry_id, moodboard)}
 
 
