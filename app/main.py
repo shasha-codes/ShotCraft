@@ -39,6 +39,7 @@ from .models import (
     ClientDecision,
     ScheduleRequest,
     ScheduleSelection,
+    ScheduleChangeRequest,
     ScheduleProposal,
     InquiryMessageCreate,
     ClientUpdateDraft,
@@ -494,6 +495,7 @@ def get_client_shoot_ideas_endpoint(client_email: str, refresh: bool = False) ->
 def get_inquiry_detail(inquiry_id: int) -> dict:
     record = next((r for r in list_inquiries() if r["id"] == inquiry_id), None)
     if not record: return {"error": "Inquiry not found"}
+    record["change_request"] = change_request_summaries([inquiry_id]).get(inquiry_id)
     record["followups"] = list_inquiry_followups(inquiry_id)
     record["timeline"] = inquiry_timeline(inquiry_id)
     record["pre_shoot_checkin"] = pre_shoot_checkin_summaries([inquiry_id]).get(inquiry_id)
@@ -652,6 +654,44 @@ def client_change_request(inquiry_id: int, decision: ClientDecision) -> dict[str
     if not set_client_decision(inquiry_id, "CLIENT_CHANGE_REQUESTED", decision.note): return {"error": "An approved production pack is required."}
     return {"id": inquiry_id, "status": "CLIENT_CHANGE_REQUESTED"}
 
+def _format_schedule_window_for_display(value: str) -> str:
+    """Keep persisted schedule preferences machine-readable but message text human-readable."""
+    match = re.fullmatch(r"\s*(\d{1,2}):(\d{2})\s*[–-]\s*(\d{1,2}):(\d{2})\s*", value or "")
+    if not match:
+        return value
+    def clock(hour: str, minute: str) -> str:
+        hour_number = int(hour)
+        return f"{(hour_number - 1) % 12 + 1}:{minute} {'AM' if hour_number < 12 else 'PM'}"
+    return f"{clock(match.group(1), match.group(2))} – {clock(match.group(3), match.group(4))}"
+
+
+def _format_schedule_datetime_for_display(value: str) -> str:
+    try:
+        return datetime.fromisoformat(value).strftime("%b %-d, %Y at %-I:%M %p")
+    except (TypeError, ValueError):
+        return value.replace("T", " ")
+
+
+@app.post("/api/inquiries/{inquiry_id}/schedule-change-request")
+def request_schedule_change(inquiry_id: int, change: ScheduleChangeRequest, request: Request) -> dict:
+    record = next((item for item in list_inquiries() if item["id"] == inquiry_id), None)
+    if not record:
+        raise HTTPException(status_code=404, detail="Inquiry not found.")
+    if request.state.user["user_type"] != "client" or record.get("client_email", "").lower() != request.state.user["email"].lower():
+        raise HTTPException(status_code=403, detail="Only the client who owns this shoot can request a schedule change.")
+    if record.get("status") not in {"SCHEDULED", "CLIENT_CONFIRMED"}:
+        raise HTTPException(status_code=409, detail="Schedule changes are available once a shoot plan has been confirmed.")
+    requested = {"shoot_date": change.shoot_date, "availability_windows": change.availability_windows}
+    requested_date = datetime.fromisoformat(change.shoot_date).strftime("%b %-d, %Y")
+    display_windows = ", ".join(_format_schedule_window_for_display(window) for window in change.availability_windows)
+    source = f"Schedule change request\nRequested date: {requested_date}\nPreferred time windows: {display_windows}"
+    if change.note and change.note.strip():
+        source += f"\nClient note: {change.note.strip()}"
+    assessment = {"request_summary":"Client requested a new shoot date or preferred time window.","impacts":["The confirmed booking remains unchanged until the photographer proposes and the client selects a new time."],"proposed_updates":{},"decision":"REVIEW","decision_reason":"A confirmed date or time needs photographer approval.","missing_information":[],"confirmed_meeting_location":None,"schedule_change":requested}
+    save_change_request(inquiry_id, source, assessment)
+    add_inquiry_message(inquiry_id, "client", request.state.user["name"], source)
+    return {"inquiry_id": inquiry_id, "status": "PENDING", "schedule_change": requested}
+
 @app.post("/api/inquiries/{inquiry_id}/schedule")
 def schedule_project(inquiry_id: int, schedule: ScheduleRequest) -> dict[str, object]:
     if not schedule_inquiry(inquiry_id, schedule.call_time, schedule.meeting_location):
@@ -743,7 +783,7 @@ def get_schedule_recommendations(inquiry_id: int) -> dict:
                 inquiry_id,
                 "photographer",
                 "ShotCraft scheduling",
-                f"Your shoot is confirmed for {request['selected_starts_at'].replace('T', ' ')} at {request.get('selected_location') or 'the agreed location'}. We’re looking forward to it!",
+                f"Your shoot is confirmed for {_format_schedule_datetime_for_display(request['selected_starts_at'])} at {request.get('selected_location') or 'the agreed location'}. We’re looking forward to it!",
             )
             request = get_schedule_request(inquiry_id)
     # A photographer may intentionally offer alternatives outside the client's
@@ -781,7 +821,8 @@ def propose_schedule_times(inquiry_id: int, proposal: ScheduleProposal, photogra
     if not record:
         raise HTTPException(status_code=404, detail="Inquiry not found.")
     inquiry = Inquiry(**json.loads(record["payload"]))
-    if not record.get("production_approved") or record.get("status") in {"CLIENT_CHANGE_REQUESTED", "SCHEDULED"}:
+    pending_schedule_change = (get_change_request(inquiry_id) or {}).get("status") == "PENDING"
+    if not record.get("production_approved") or record.get("status") == "CLIENT_CHANGE_REQUESTED" or (record.get("status") == "SCHEDULED" and not pending_schedule_change):
         raise HTTPException(status_code=409, detail="Share an active production plan before proposing times.")
     if not inquiry.photographer_email or inquiry.photographer_email.lower() != photographer_email.lower():
         raise HTTPException(status_code=403, detail="Only the assigned photographer can propose times for this shoot.")
@@ -807,7 +848,19 @@ def propose_schedule_times(inquiry_id: int, proposal: ScheduleProposal, photogra
             "location": slot.location,
             "rationale": slot.rationale or "Proposed by your photographer.",
         })
-    return save_schedule_suggestions(inquiry_id, photographer_email, suggestions)
+    saved = save_schedule_suggestions(inquiry_id, photographer_email, suggestions)
+    option_summary = "; ".join(
+        f"{_format_schedule_datetime_for_display(item['starts_at'])} – "
+        f"{datetime.fromisoformat(item['ends_at']).strftime('%-I:%M %p')}"
+        for item in suggestions
+    )
+    add_inquiry_message(
+        inquiry_id,
+        "photographer",
+        "ShotCraft scheduling",
+        f"Your photographer proposed revised shoot times: {option_summary}. Open your shoot to review and choose the option that works best for you.",
+    )
+    return saved
 
 @app.post("/api/inquiries/{inquiry_id}/schedule-selection")
 def select_schedule_time(inquiry_id: int, selection: ScheduleSelection) -> dict:
@@ -821,11 +874,13 @@ def select_schedule_time(inquiry_id: int, selection: ScheduleSelection) -> dict:
         raise HTTPException(status_code=409, detail="This time is no longer available. Please choose another option.")
     if not confirm_client_schedule_selection(inquiry_id, selection.starts_at, selection.ends_at, selection.location):
         raise HTTPException(status_code=409, detail="This time is no longer available for selection.")
+    if (get_change_request(inquiry_id) or {}).get("status") == "PENDING":
+        resolve_change_request(inquiry_id)
     add_inquiry_message(
         inquiry_id,
         "photographer",
         "ShotCraft scheduling",
-        f"Your shoot is confirmed for {selection.starts_at.replace('T', ' ')} at {selection.location}. We’re looking forward to it!",
+        f"Your shoot is confirmed for {_format_schedule_datetime_for_display(selection.starts_at)} at {selection.location}. We’re looking forward to it!",
     )
     return get_schedule_request(inquiry_id) or {}
 

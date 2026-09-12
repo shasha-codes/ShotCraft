@@ -505,7 +505,7 @@ def confirm_client_schedule_selection(inquiry_id: int, starts_at: str, ends_at: 
             return False
         booked = db.execute(
             """UPDATE inquiries SET status='SCHEDULED', call_time=?, meeting_location=?, updated_at=CURRENT_TIMESTAMP
-               WHERE id=? AND status='CLIENT_CONFIRMED'""",
+               WHERE id=? AND status IN ('CLIENT_CONFIRMED', 'SCHEDULED')""",
             (starts_at, location, inquiry_id),
         )
         if not booked.rowcount:
