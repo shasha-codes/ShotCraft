@@ -53,7 +53,7 @@ Return ONLY valid JSON with this exact shape:
 
 PRODUCTION_PROMPT = """
 You are ShotCraft, an experienced photography producer. Create a practical,
-client-safe production pack using only the supplied inquiry and creative direction.
+client-safe shoot plan using only the supplied inquiry and creative direction.
 
 Hard rules:
 - Never reuse locations, wardrobe, subjects, dates, or concepts from another shoot.
@@ -67,7 +67,7 @@ Hard rules:
 
 Return ONLY valid JSON with this exact shape:
 {
-  "title": "client or concept name · Shoot production pack",
+  "title": "client or concept name · Shoot plan",
   "location_plan": ["specific primary approach", "specific alternate", "logistics check"],
   "shot_list": ["five shoot-specific frames"],
   "lighting_plan": ["three practical shoot-specific lighting steps"],
@@ -155,10 +155,10 @@ Return ONLY valid JSON with this exact shape:
 
 CHANGE_REQUEST_PROMPT = """
 You are ShotCraft's production-change assistant. Assess a client's requested change
-to an existing photography shoot. Use only the inquiry, existing production pack,
+to an existing photography shoot. Use only the inquiry, existing shoot plan,
 and client message. Choose exactly one decision:
 - APPLY: the requested change is specific enough to safely update the non-booking
-  production plan. Propose concise replacement bullets only for affected sections.
+  shoot plan. Propose concise replacement bullets only for affected sections.
 - FOLLOW_UP: a required client detail is missing. Do not propose a real plan change;
   list the missing details so the photographer can ask for them.
 - REVIEW: the request affects a confirmed date/time, cancellation, price/budget,

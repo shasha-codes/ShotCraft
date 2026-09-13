@@ -49,6 +49,11 @@ def _ensure_schema(db: sqlite3.Connection) -> None:
         updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY(inquiry_id) REFERENCES inquiries(id) ON DELETE CASCADE
     )""")
+    schedule_columns = {row[1] for row in db.execute("PRAGMA table_info(schedule_requests)")}
+    if "agent_review" not in schedule_columns:
+        db.execute("ALTER TABLE schedule_requests ADD COLUMN agent_review TEXT")
+    if "preview_signature" not in schedule_columns:
+        db.execute("ALTER TABLE schedule_requests ADD COLUMN preview_signature TEXT")
     db.execute("""CREATE TABLE IF NOT EXISTS inquiry_change_requests (
         inquiry_id INTEGER PRIMARY KEY,
         source_message TEXT NOT NULL,
@@ -136,6 +141,38 @@ def _ensure_schema(db: sqlite3.Connection) -> None:
         db.execute("ALTER TABLE inquiry_messages ADD COLUMN read_by_client_at TEXT")
     if "read_by_photographer_at" not in message_columns:
         db.execute("ALTER TABLE inquiry_messages ADD COLUMN read_by_photographer_at TEXT")
+    db.execute("""CREATE TABLE IF NOT EXISTS client_notifications (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        client_email TEXT NOT NULL,
+        inquiry_id INTEGER NOT NULL,
+        notification_type TEXT NOT NULL,
+        event_key TEXT NOT NULL UNIQUE,
+        title TEXT NOT NULL,
+        body TEXT NOT NULL,
+        target_view TEXT NOT NULL,
+        action_required INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        read_at TEXT,
+        resolved_at TEXT,
+        FOREIGN KEY(inquiry_id) REFERENCES inquiries(id) ON DELETE CASCADE
+    )""")
+    db.execute("CREATE INDEX IF NOT EXISTS idx_client_notifications_email ON client_notifications(client_email, created_at DESC)")
+    db.execute("""CREATE TABLE IF NOT EXISTS photographer_notifications (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        photographer_email TEXT NOT NULL,
+        inquiry_id INTEGER NOT NULL,
+        notification_type TEXT NOT NULL,
+        event_key TEXT NOT NULL UNIQUE,
+        title TEXT NOT NULL,
+        body TEXT NOT NULL,
+        target_view TEXT NOT NULL,
+        action_required INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        read_at TEXT,
+        resolved_at TEXT,
+        FOREIGN KEY(inquiry_id) REFERENCES inquiries(id) ON DELETE CASCADE
+    )""")
+    db.execute("CREATE INDEX IF NOT EXISTS idx_photographer_notifications_email ON photographer_notifications(photographer_email, created_at DESC)")
 
 def _record_event(db: sqlite3.Connection, inquiry_id: int, event_type: str, metadata: dict | None = None) -> None:
     encoded = json.dumps(metadata or {})
@@ -305,8 +342,8 @@ def _backfill_events(db: sqlite3.Connection, inquiry_id: int, row: sqlite3.Row |
 def inquiry_timeline(inquiry_id: int) -> list[dict]:
     milestones = [
         ("INQUIRY_RECEIVED", "Inquiry received"), ("FOLLOWUP_SUBMITTED", "Follow-up submitted"),
-        ("DRAFT_PLAN_READY", "Production plan drafted"),
-        ("PRODUCTION_PLAN_SHARED", "Production plan shared"),
+        ("DRAFT_PLAN_READY", "Shoot plan drafted"),
+        ("PRODUCTION_PLAN_SHARED", "Shoot plan shared"),
         ("SHOOT_SCHEDULED", "Shoot scheduled"),
     ]
     with sqlite3.connect(DB_PATH) as db:
@@ -367,6 +404,13 @@ def authenticate_user(email: str, password: str, user_type: str) -> dict | None:
             db.execute("UPDATE users SET password_hash=? WHERE id=?", (_hash_password(password), row[0]))
             db.commit()
     return {"id": row[0], "name":row[1],"email":row[2],"user_type":row[4],"city":row[5],"bio":row[6],"specialties":row[7],"profile_image":row[8]}
+
+def get_photographer_identity(email: str) -> dict | None:
+    """Return only the account identity needed to sign an AI-authored draft."""
+    with sqlite3.connect(DB_PATH) as db:
+        _ensure_schema(db)
+        row = db.execute("SELECT name, email FROM users WHERE lower(email)=? AND user_type='photographer'", (email.lower(),)).fetchone()
+    return {"name": row[0], "email": row[1]} if row else None
 
 def create_auth_session(user_id: int, lifetime_days: int = 14) -> str:
     token = secrets.token_urlsafe(32)
@@ -480,6 +524,175 @@ def list_inquiries() -> list[dict]:
         rows = db.execute("SELECT * FROM inquiries ORDER BY id DESC").fetchall()
         return [dict(row) for row in rows]
 
+def _refresh_legacy_plan_notification_copy(db: sqlite3.Connection, table: str, owner_column: str, email: str) -> None:
+    """Update saved notification copy without changing IDs or read state."""
+    if (table, owner_column) not in {
+        ("client_notifications", "client_email"),
+        ("photographer_notifications", "photographer_email"),
+    }:
+        raise ValueError("Unsupported notification table")
+    for old, new in (
+        ("Production plan", "Shoot plan"),
+        ("production plan", "shoot plan"),
+        ("Production pack", "Shoot plan"),
+        ("production pack", "shoot plan"),
+    ):
+        db.execute(
+            f"UPDATE {table} SET title=REPLACE(title, ?, ?), body=REPLACE(body, ?, ?) "
+            f"WHERE lower({owner_column})=? AND (instr(title, ?) > 0 OR instr(body, ?) > 0)",
+            (old, new, old, new, email, old, old),
+        )
+
+
+def list_client_notifications(client_email: str) -> list[dict]:
+    """Materialize workflow events, leaving ordinary messages in the inbox."""
+    email = client_email.lower()
+    with sqlite3.connect(DB_PATH) as db:
+        db.row_factory = sqlite3.Row
+        _ensure_schema(db)
+        # Remove message notifications created by earlier versions, including
+        # unread ones, so the bell count reflects workflow updates only.
+        db.execute("DELETE FROM client_notifications WHERE lower(client_email)=? AND notification_type='NEW_MESSAGE'", (email,))
+        inquiries = db.execute("SELECT * FROM inquiries WHERE lower(client_email)=?", (email,)).fetchall()
+        active_keys: set[str] = set()
+
+        def add(record, kind: str, key: str, heading: str, body: str, view: str, action: bool, created_at: str | None = None) -> None:
+            active_keys.add(key)
+            db.execute("""INSERT OR IGNORE INTO client_notifications
+                (client_email, inquiry_id, notification_type, event_key, title, body, target_view, action_required, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, CURRENT_TIMESTAMP))""",
+                (email, record["id"], kind, key, heading, body, view, int(action), created_at))
+
+        for record in inquiries:
+            try:
+                payload = json.loads(record["payload"] or "{}")
+                analysis = json.loads(record["analysis"] or "{}")
+            except (json.JSONDecodeError, TypeError):
+                payload, analysis = {}, {}
+            project = analysis.get("concept_name") or payload.get("style_direction") or "Your shoot"
+            inquiry_id = int(record["id"])
+            if record["status"] == "NEEDS_INFORMATION":
+                signature = hashlib.sha256((record["analysis"] or str(record["updated_at"])).encode()).hexdigest()[:12]
+                add(record, "FOLLOWUP_REQUESTED", f"followup:{inquiry_id}:{signature}", "More details needed", f"Your photographer has follow-up questions about {project}.", "followup", True, record["updated_at"])
+            if record["production_approved"] and record["status"] not in {"CLIENT_CONFIRMED", "SCHEDULED", "CANCELLED"}:
+                signature = hashlib.sha256((record["production_pack"] or str(record["updated_at"])).encode()).hexdigest()[:12]
+                add(record, "PLAN_READY", f"plan:{inquiry_id}:{signature}", "Your shoot plan is ready", f"Review and confirm the creative plan for {project}.", "plan", True, record["updated_at"])
+            schedule = db.execute("SELECT * FROM schedule_requests WHERE inquiry_id=?", (inquiry_id,)).fetchone()
+            if schedule and schedule["status"] == "PENDING_CLIENT":
+                add(record, "SCHEDULE_OPTIONS", f"schedule:{inquiry_id}:{schedule['updated_at']}", "Choose your shoot time", f"New scheduling options are ready for {project}.", "plan", True, schedule["updated_at"])
+            if record["status"] == "SCHEDULED" and record["call_time"]:
+                add(record, "SHOOT_CONFIRMED", f"confirmed:{inquiry_id}:{record['call_time']}", "Shoot confirmed", f"{project} is scheduled. Review the final details.", "details", False, record["updated_at"])
+            if record["status"] == "CANCELLED" and record["cancellation_status"] == "APPROVED":
+                decided_at = record["cancellation_reviewed_at"] or record["updated_at"]
+                add(record, "SHOOT_CANCELLED", f"cancelled:{inquiry_id}:{decided_at}", "Shoot cancelled", f"Your cancellation for {project} was approved. View the final details and fee summary.", "plan", False, decided_at)
+            elif record["cancellation_status"] == "DECLINED":
+                decided_at = record["cancellation_reviewed_at"] or record["updated_at"]
+                add(record, "CANCELLATION_DECLINED", f"cancellation-declined:{inquiry_id}:{decided_at}", "Cancellation request declined", f"Your booking for {project} remains scheduled. View the photographer's decision.", "details", False, decided_at)
+
+        actionable = db.execute("SELECT event_key FROM client_notifications WHERE client_email=? AND action_required=1 AND resolved_at IS NULL", (email,)).fetchall()
+        for row in actionable:
+            if row["event_key"] not in active_keys:
+                db.execute("UPDATE client_notifications SET resolved_at=CURRENT_TIMESTAMP WHERE event_key=?", (row["event_key"],))
+        _refresh_legacy_plan_notification_copy(db, "client_notifications", "client_email", email)
+        db.commit()
+        rows = db.execute("SELECT * FROM client_notifications WHERE client_email=? ORDER BY datetime(created_at) DESC, id DESC", (email,)).fetchall()
+        return [dict(row) for row in rows]
+
+def mark_client_notification_read(notification_id: int, client_email: str) -> bool:
+    with sqlite3.connect(DB_PATH) as db:
+        _ensure_schema(db)
+        result = db.execute("UPDATE client_notifications SET read_at=COALESCE(read_at, CURRENT_TIMESTAMP) WHERE id=? AND lower(client_email)=?", (notification_id, client_email.lower()))
+        db.commit()
+        return result.rowcount > 0
+
+def mark_all_client_notifications_read(client_email: str) -> int:
+    with sqlite3.connect(DB_PATH) as db:
+        _ensure_schema(db)
+        result = db.execute("UPDATE client_notifications SET read_at=COALESCE(read_at, CURRENT_TIMESTAMP) WHERE lower(client_email)=?", (client_email.lower(),))
+        db.commit()
+        return result.rowcount
+
+def list_photographer_notifications(photographer_email: str) -> list[dict]:
+    """Materialize durable workflow notifications for the photographer."""
+    email = photographer_email.lower()
+    with sqlite3.connect(DB_PATH) as db:
+        db.row_factory = sqlite3.Row
+        _ensure_schema(db)
+        db.execute("DELETE FROM photographer_notifications WHERE lower(photographer_email)=? AND notification_type='NEW_MESSAGE'", (email,))
+        rows = db.execute("SELECT * FROM inquiries ORDER BY id DESC").fetchall()
+        active_keys: set[str] = set()
+
+        def add(record, kind: str, key: str, heading: str, body: str, view: str, action: bool, created_at: str | None = None) -> None:
+            active_keys.add(key)
+            db.execute("""INSERT OR IGNORE INTO photographer_notifications
+                (photographer_email, inquiry_id, notification_type, event_key, title, body, target_view, action_required, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, CURRENT_TIMESTAMP))""",
+                (email, record["id"], kind, key, heading, body, view, int(action), created_at))
+
+        for record in rows:
+            try:
+                payload = json.loads(record["payload"] or "{}")
+                analysis = json.loads(record["analysis"] or "{}")
+            except (json.JSONDecodeError, TypeError):
+                payload, analysis = {}, {}
+            assigned = (payload.get("photographer_email") or "").lower()
+            if assigned and assigned != email:
+                continue
+            inquiry_id = int(record["id"])
+            project = analysis.get("concept_name") or payload.get("style_direction") or "Client shoot"
+            client = payload.get("client_name") or "A client"
+
+            if record["status"] == "READY_FOR_REVIEW" and not record["production_approved"]:
+                add(record, "INQUIRY_READY", f"inquiry-ready:{inquiry_id}", "Inquiry ready for review", f"{client}’s inquiry for {project} is ready for your review.", "project", True, record["updated_at"])
+            followups = db.execute("SELECT * FROM inquiry_followups WHERE inquiry_id=? ORDER BY id", (inquiry_id,)).fetchall()
+            for followup in followups:
+                add(record, "FOLLOWUP_SUBMITTED", f"photographer-followup:{followup['id']}", "Client submitted follow-up details", f"{client} added more information for {project}.", "project", False, followup["created_at"])
+            # Emit one calm completion update only after intake has cleared all
+            # required details. A follow-up row is required so initial inquiries
+            # that needed no follow-up do not receive this message.
+            if followups and record["status"] in {"DRAFTING_PLAN", "READY_FOR_REVIEW", "BUILDING_PLAN"}:
+                latest_followup = followups[-1]
+                add(record, "FOLLOWUP_COMPLETE", f"photographer-followup-complete:{latest_followup['id']}", "Follow-ups complete", f"{client} answered all required follow-up questions for {project}. ShotCraft is generating the creative brief and moodboard now.", "project", False, latest_followup["created_at"])
+            if record["production_pack"] and not record["production_approved"]:
+                signature = hashlib.sha256(record["production_pack"].encode()).hexdigest()[:12]
+                add(record, "PLAN_READY", f"photographer-plan:{inquiry_id}:{signature}", "Shoot plan ready", f"Review and share the shoot plan for {project}.", "production", True, record["updated_at"])
+            if record["status"] == "CLIENT_CONFIRMED":
+                add(record, "CLIENT_CONFIRMED", f"client-confirmed:{inquiry_id}", "Client approved the plan", f"{client} approved {project}. Review their selected time and finalize the booking.", "project", True, record["updated_at"])
+
+            schedule = db.execute("SELECT * FROM schedule_requests WHERE inquiry_id=?", (inquiry_id,)).fetchone()
+            if schedule and schedule["status"] == "PENDING_PHOTOGRAPHER":
+                add(record, "TIME_SELECTED", f"time-selected:{inquiry_id}:{schedule['updated_at']}", "Client selected a time", f"{client} selected a proposed time for {project}. Confirm the booking.", "project", True, schedule["updated_at"])
+            change = db.execute("SELECT * FROM inquiry_change_requests WHERE inquiry_id=?", (inquiry_id,)).fetchone()
+            if change and change["status"] == "PENDING":
+                add(record, "CHANGE_REQUESTED", f"change:{inquiry_id}:{change['updated_at']}", "Client requested a change", f"Review the requested update for {project}.", "change-review", True, change["updated_at"])
+            if record["cancellation_status"] == "PENDING":
+                add(record, "CANCELLATION_REQUESTED", f"cancellation:{inquiry_id}:{record['cancellation_requested_at']}", "Cancellation requested", f"{client} asked to cancel {project}. Review the request before changing the booking.", "project", True, record["cancellation_requested_at"])
+            if record["status"] == "SCHEDULED" and record["call_time"]:
+                add(record, "SHOOT_CONFIRMED", f"photographer-confirmed:{inquiry_id}:{record['call_time']}", "Shoot confirmed", f"{project} is confirmed and on your schedule.", "project", False, record["updated_at"])
+
+        actionable = db.execute("SELECT event_key FROM photographer_notifications WHERE photographer_email=? AND action_required=1 AND resolved_at IS NULL", (email,)).fetchall()
+        for row in actionable:
+            if row["event_key"] not in active_keys:
+                db.execute("UPDATE photographer_notifications SET resolved_at=CURRENT_TIMESTAMP WHERE event_key=?", (row["event_key"],))
+        _refresh_legacy_plan_notification_copy(db, "photographer_notifications", "photographer_email", email)
+        db.commit()
+        notifications = db.execute("SELECT * FROM photographer_notifications WHERE photographer_email=? ORDER BY datetime(created_at) DESC, id DESC", (email,)).fetchall()
+        return [dict(row) for row in notifications]
+
+def mark_photographer_notification_read(notification_id: int, photographer_email: str) -> bool:
+    with sqlite3.connect(DB_PATH) as db:
+        _ensure_schema(db)
+        result = db.execute("UPDATE photographer_notifications SET read_at=COALESCE(read_at, CURRENT_TIMESTAMP) WHERE id=? AND lower(photographer_email)=?", (notification_id, photographer_email.lower()))
+        db.commit()
+        return result.rowcount > 0
+
+def mark_all_photographer_notifications_read(photographer_email: str) -> int:
+    with sqlite3.connect(DB_PATH) as db:
+        _ensure_schema(db)
+        result = db.execute("UPDATE photographer_notifications SET read_at=COALESCE(read_at, CURRENT_TIMESTAMP) WHERE lower(photographer_email)=?", (photographer_email.lower(),))
+        db.commit()
+        return result.rowcount
+
 def save_moodboard(inquiry_id: int, result: dict) -> None:
     with sqlite3.connect(DB_PATH) as db:
         _ensure_schema(db)
@@ -537,7 +750,7 @@ def schedule_inquiry(inquiry_id: int, call_time: str, meeting_location: str) -> 
     with sqlite3.connect(DB_PATH) as db:
         _ensure_schema(db)
         # Permit a photographer to correct an existing schedule, but only after
-        # the client has confirmed the production plan.
+        # the client has confirmed the shoot plan.
         cur = db.execute(
             """UPDATE inquiries
                SET status='SCHEDULED', call_time=?, meeting_location=?, updated_at=CURRENT_TIMESTAMP
@@ -591,22 +804,25 @@ def scheduled_times(photographer_email: str) -> list[dict]:
     times.extend({"inquiry_id": row["inquiry_id"], "starts_at": row["selected_starts_at"], "ends_at": row["selected_ends_at"], "location": row["selected_location"], "kind": "pending_confirmation"} for row in pending)
     return times
 
-def save_schedule_suggestions(inquiry_id: int, photographer_email: str, suggestions: list[dict], status: str = "PENDING_CLIENT") -> dict:
+def save_schedule_suggestions(inquiry_id: int, photographer_email: str, suggestions: list[dict], status: str = "PENDING_CLIENT", agent_review: dict | None = None, preview_signature: str | None = None) -> dict:
     if status not in {"PENDING_CLIENT", "PENDING_PHOTOGRAPHER_REVIEW"}:
         raise ValueError("Unsupported schedule suggestion status")
     with sqlite3.connect(DB_PATH) as db:
         db.row_factory = sqlite3.Row
         _ensure_schema(db)
-        db.execute("""INSERT INTO schedule_requests (inquiry_id, photographer_email, suggestions, status)
-            VALUES (?, ?, ?, ?)
+        db.execute("""INSERT INTO schedule_requests (inquiry_id, photographer_email, suggestions, status, agent_review, preview_signature)
+            VALUES (?, ?, ?, ?, ?, ?)
             ON CONFLICT(inquiry_id) DO UPDATE SET photographer_email=excluded.photographer_email,
               suggestions=excluded.suggestions, selected_starts_at=NULL, selected_ends_at=NULL,
-              selected_location=NULL, status=excluded.status, updated_at=CURRENT_TIMESTAMP""",
-            (inquiry_id, photographer_email.lower(), json.dumps(suggestions), status))
+              selected_location=NULL, status=excluded.status, agent_review=excluded.agent_review,
+              preview_signature=excluded.preview_signature, updated_at=CURRENT_TIMESTAMP""",
+            (inquiry_id, photographer_email.lower(), json.dumps(suggestions), status,
+             json.dumps(agent_review) if agent_review is not None else None, preview_signature))
         if status == "PENDING_CLIENT":
             db.execute("""UPDATE inquiry_change_requests SET status='AWAITING_CLIENT', updated_at=CURRENT_TIMESTAMP
                 WHERE inquiry_id=? AND status='PENDING' AND json_extract(assessment, '$.schedule_change') IS NOT NULL""", (inquiry_id,))
-        _record_event(db, inquiry_id, "TIME_OPTIONS_PROPOSED", {"count": len(suggestions)})
+        if status == "PENDING_CLIENT":
+            _record_event(db, inquiry_id, "TIME_OPTIONS_PROPOSED", {"count": len(suggestions)})
         db.commit()
     return get_schedule_request(inquiry_id) or {}
 
@@ -618,6 +834,7 @@ def get_schedule_request(inquiry_id: int) -> dict | None:
     if not row: return None
     result = dict(row)
     result["suggestions"] = json.loads(result.pop("suggestions") or "[]")
+    result["agent_review"] = json.loads(result.get("agent_review") or "{}")
     return result
 
 def schedule_request_summaries(inquiry_ids: list[int]) -> dict[int, dict]:
@@ -796,6 +1013,29 @@ def append_reply(inquiry_id: int, answers: str) -> dict | None:
         _record_event(db, inquiry_id, "FOLLOWUP_SUBMITTED", {"answers": answers})
         db.commit()
     return Inquiry(**payload).model_dump()
+
+def notify_client_followups_complete(inquiry_id: int) -> bool:
+    """Notify only after analysis proves the latest answers cleared every requirement."""
+    with sqlite3.connect(DB_PATH) as db:
+        db.row_factory = sqlite3.Row
+        _ensure_schema(db)
+        record = db.execute("SELECT * FROM inquiries WHERE id=?", (inquiry_id,)).fetchone()
+        followup = db.execute("SELECT id FROM inquiry_followups WHERE inquiry_id=? ORDER BY id DESC LIMIT 1", (inquiry_id,)).fetchone()
+        if not record or not followup or record["status"] != "DRAFTING_PLAN":
+            return False
+        analysis = json.loads(record["analysis"] or "{}")
+        if analysis.get("missing_information"):
+            return False
+        payload = json.loads(record["payload"] or "{}")
+        project = analysis.get("concept_name") or payload.get("style_direction") or "your shoot"
+        result = db.execute("""INSERT OR IGNORE INTO client_notifications
+            (client_email, inquiry_id, notification_type, event_key, title, body, target_view, action_required)
+            VALUES (?, ?, 'FOLLOWUP_COMPLETE', ?, 'You’re all set for now', ?, 'details', 0)""",
+            ((record["client_email"] or payload.get("client_email") or "").lower(), inquiry_id,
+             f"followup-complete:{followup['id']}",
+             f"We received all the details for {project}. ShotCraft is preparing the creative brief and moodboard; we’ll notify you when the plan is ready to review."))
+        db.commit()
+        return result.rowcount > 0
 
 
 def list_inquiry_followups(inquiry_id: int) -> list[dict]:

@@ -1,0 +1,263 @@
+/* Client profile styles load after the historical workspace bundle. */
+.client-profile-page {
+  max-width: 880px;
+  margin: 0 auto;
+}
+
+.client-profile-page .profile-page-head {
+  align-items: center;
+  margin-bottom: 24px;
+}
+
+.client-profile-page .profile-page-head h1 {
+  margin: 7px 0 7px;
+  font-size: clamp(40px, 4.5vw, 54px);
+}
+
+.client-profile-page .profile-page-head p {
+  font-size: 15px;
+}
+
+.client-profile-page .profile-layout {
+  display: block;
+}
+
+.client-profile-page .profile-details-card {
+  padding: 28px 30px 0;
+  border-radius: 20px;
+  box-shadow: 0 18px 48px rgba(53, 40, 78, .08);
+}
+
+.client-profile-page .profile-section-head {
+  padding-bottom: 20px;
+}
+
+.client-profile-page .profile-section-head h2 {
+  font-size: 28px;
+}
+
+.client-profile-page .profile-fields-grid {
+  padding: 12px 0 22px;
+}
+
+.client-profile-page .client-photo-field {
+  margin: 10px 0 14px !important;
+  padding: 0 !important;
+  border: 0 !important;
+  background: transparent !important;
+}
+
+.client-profile-page .client-photo-control {
+  display: flex !important;
+  align-items: center !important;
+  gap: 14px !important;
+  min-height: 76px !important;
+  padding: 12px 14px !important;
+  border: 1px solid #e1dbe7 !important;
+  border-radius: 13px !important;
+  background: #faf9fc !important;
+}
+
+.client-profile-page .client-photo-control .profile-picture-preview {
+  flex: 0 0 52px !important;
+  width: 52px !important;
+  height: 52px !important;
+  margin: 0 !important;
+  border: 2px solid #fff !important;
+  background: #eee9f8 !important;
+  color: #7057c7 !important;
+  font-size: 20px !important;
+  box-shadow: 0 0 0 1px #d8cfe7 !important;
+}
+
+.client-profile-page .client-photo-copy {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.client-profile-page .client-photo-copy b,
+.client-profile-page .client-photo-copy span {
+  display: block;
+}
+
+.client-profile-page .client-photo-copy b {
+  font-size: 12px;
+}
+
+.client-profile-page .client-photo-copy span {
+  margin-top: 2px;
+  color: #837b87;
+  font-size: 10px;
+}
+
+.client-profile-page .client-avatar-action {
+  flex: 0 0 132px !important;
+  min-width: 132px !important;
+}
+
+.client-profile-page .client-avatar-action .profile-upload-row {
+  display: block !important;
+  width: 132px !important;
+  min-width: 132px !important;
+  margin: 0 !important;
+}
+
+.client-profile-page .client-avatar-action .profile-upload-button {
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  width: 132px !important;
+  padding: 9px 12px !important;
+  border: 1px solid #d4cbe1 !important;
+  border-radius: 10px !important;
+  background: #fff !important;
+  color: #4e435e !important;
+  box-shadow: none !important;
+  font-size: 11px !important;
+  line-height: 1.2 !important;
+}
+
+.client-profile-page .client-avatar-action .profile-upload-name {
+  display: block !important;
+  max-width: 132px !important;
+  margin-top: 5px !important;
+  overflow: hidden !important;
+  color: #8a8390 !important;
+  font-size: 8px !important;
+  text-align: center !important;
+  text-overflow: ellipsis !important;
+  white-space: nowrap !important;
+}
+
+.client-profile-page .profile-layout .bio-field textarea {
+  min-height: 128px !important;
+}
+
+.client-profile-page .profile-actions {
+  padding-top: 17px;
+  padding-bottom: 17px;
+}
+
+@media (max-width: 620px) {
+  .client-profile-page .profile-page-head {
+    display: block;
+  }
+
+  .client-profile-page .profile-details-card {
+    padding: 24px 20px 0;
+  }
+
+  .client-profile-page .client-photo-control {
+    align-items: flex-start !important;
+    flex-wrap: wrap !important;
+  }
+
+  .client-profile-page .client-avatar-action {
+    flex: 1 0 100% !important;
+  }
+
+  .client-profile-page .client-avatar-action .profile-upload-row,
+  .client-profile-page .client-avatar-action .profile-upload-button {
+    width: 100% !important;
+  }
+
+  .client-profile-page .client-avatar-action .profile-upload-name {
+    max-width: none !important;
+  }
+}
+
+/* Match the photographer profile's balanced two-card composition. */
+.client-profile-page {
+  max-width: 1120px;
+}
+
+.client-profile-page .profile-layout {
+  display: grid;
+  grid-template-columns: minmax(245px, .36fr) minmax(0, 1fr);
+  align-items: stretch;
+  gap: 18px;
+}
+
+.client-profile-page .client-profile-card {
+  position: relative;
+  top: auto;
+  align-self: stretch;
+  display: flex;
+  height: 100%;
+  padding: 30px;
+  flex-direction: column;
+  background: linear-gradient(145deg, #211d29 0%, #17151c 68%);
+  color: #fff;
+}
+
+.client-profile-page .client-profile-card .profile-picture-field {
+  display: block !important;
+}
+
+.client-profile-page .client-profile-card .profile-picture-preview {
+  width: 112px !important;
+  height: 112px !important;
+  margin: 0 auto 26px !important;
+  border: 4px solid #2c2735 !important;
+  background: #403752 !important;
+  color: #c9baff !important;
+  font-size: 40px !important;
+  box-shadow: 0 0 0 1px #665c72, 0 20px 42px #09070c66 !important;
+}
+
+.client-profile-page .client-profile-card .profile-card-kicker {
+  color: #a790f8;
+}
+
+.client-profile-page .client-profile-card h2 {
+  margin: 7px 0 3px;
+  color: #fff;
+  font: 500 29px/1.05 Georgia, serif;
+  letter-spacing: -.025em;
+}
+
+.client-profile-page .client-profile-card p {
+  margin: 0 0 22px;
+  color: #a9a1b1;
+  font-size: 13px;
+}
+
+.client-profile-page .client-profile-card .profile-upload-row {
+  display: grid !important;
+  width: 100% !important;
+  margin-top: 15px !important;
+  gap: 9px !important;
+}
+
+.client-profile-page .client-profile-card .profile-upload-button {
+  width: 100% !important;
+  justify-content: center !important;
+  padding: 11px 14px !important;
+  border-color: #7c65d6 !important;
+  background: #7057c7 !important;
+  color: #fff !important;
+}
+
+.client-profile-page .client-profile-card .profile-upload-name {
+  max-width: 100% !important;
+  color: #a9a1b1 !important;
+  text-align: center !important;
+}
+
+.client-profile-page .client-profile-card .profile-picture-field small {
+  display: block;
+  margin-top: 8px;
+  color: #81798a;
+  font-size: 10px;
+  text-align: center;
+}
+
+@media (max-width: 850px) {
+  .client-profile-page .profile-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .client-profile-page .client-profile-card {
+    height: auto;
+  }
+}

@@ -126,10 +126,10 @@ def create_moodboard(request: MoodboardRequest) -> Moodboard:
 
 
 def build_production_pack(inquiry: Inquiry, moodboard: dict | None = None) -> ProductionPack:
-    """Create a production pack scoped exclusively to one inquiry."""
+    """Create a shoot plan scoped exclusively to one inquiry."""
     payload = {"inquiry": inquiry.model_dump(), "creative_direction": moodboard or {}}
     return ProductionPack.model_validate_json(
-        _json(_complete(PRODUCTION_PROMPT, f"Create the production pack from:\n{json.dumps(payload, indent=2)}", PLANNING_MODEL_ID))
+        _json(_complete(PRODUCTION_PROMPT, f"Create the shoot plan from:\n{json.dumps(payload, indent=2)}", PLANNING_MODEL_ID))
     )
 
 
@@ -254,7 +254,7 @@ def coordinate_creative_direction(
     agent = Agent(
         model=OpenAIModel(model_id=_openai_model_id(PLANNING_MODEL_ID), client_args={"api_key": BEDROCK_API_KEY, "base_url": BEDROCK_OPENAI_ENDPOINT}),
         tools=[read_inquiry_context, read_followup_history, draft_creative_brief, plan_moodboard],
-        system_prompt="""You coordinate ShotCraft's creative planning. Call read_inquiry_context and read_followup_history first. Then call draft_creative_brief and plan_moodboard in that order. These specialist tools create the actual artifacts; do not invent their results. The photographer must review the final production plan. Never send anything to the client or confirm a booking. After all tools complete, summarize the prepared direction in one sentence.""",
+        system_prompt="""You coordinate ShotCraft's creative planning. Call read_inquiry_context and read_followup_history first. Then call draft_creative_brief and plan_moodboard in that order. These specialist tools create the actual artifacts; do not invent their results. The photographer must review the final shoot plan. Never send anything to the client or confirm a booking. After all tools complete, summarize the prepared direction in one sentence.""",
         callback_handler=None,
     )
     agent(f"Prepare the creative direction for inquiry {inquiry_id}. Use every required tool.")
@@ -370,6 +370,7 @@ def coordinate_cancellation_review(
     if os.getenv("SHOTCRAFT_AGENTCORE_ENABLED", "").lower() in {"1", "true", "yes"}:
         remote = _invoke_agentcore({
             "operation": "cancellation_review",
+            "draft_requirements": "Write the entire client message with exactly one sign-off using the photographer_name and photographer_email in booking. Use the explicit shoot date; no placeholders, duplicate closings, or unverified refund-processing promises.",
             "facts": {
                 "booking": get_booking(),
                 "policy": get_policy(),
@@ -413,7 +414,7 @@ def coordinate_cancellation_review(
     agent = Agent(
         model=OpenAIModel(model_id=_openai_model_id(PLANNING_MODEL_ID), client_args={"api_key": BEDROCK_API_KEY, "base_url": BEDROCK_OPENAI_ENDPOINT}),
         tools=[read_confirmed_booking, read_accepted_policy, read_client_request, read_project_history],
-        system_prompt="""You are ShotCraft's cancellation review assistant. Call all four tools before responding. Use only their facts. Recommend APPROVE, DECLINE, or MESSAGE_FIRST for photographer consideration. If the reason or policy context is unclear, favor MESSAGE_FIRST. The fee and refund are server-calculated guidance; never recalculate them, promise payment, or imply you can waive or charge a fee yourself. The booking remains active until the photographer approves cancellation. Write one concise, empathetic, editable message draft appropriate to your recommended action. Do not send it. Return only JSON: {\"recommended_action\":\"APPROVE|DECLINE|MESSAGE_FIRST\",\"rationale\":\"...\",\"message_draft\":\"...\"}.""",
+        system_prompt="""You are ShotCraft's cancellation review assistant. Call all four tools before responding. Use only their facts. Recommend APPROVE, DECLINE, or MESSAGE_FIRST for photographer consideration. If the reason or policy context is unclear, favor MESSAGE_FIRST. The fee and refund are server-calculated guidance; never recalculate them, promise payment, or imply you can waive or charge a fee yourself. The booking remains active until the photographer approves cancellation. Write the complete, concise, empathetic, editable client message yourself, including exactly one sign-off using the photographer_name and photographer_email returned by the booking tool. Never use a placeholder, an invented business name, or a second sign-off. Refer to the confirmed shoot by its explicit calendar date from the booking, never as today or tomorrow, because the draft may be reviewed later. Do not promise that ShotCraft processes refunds or give an unsupported refund timeline. Do not send the message. Return only JSON: {\"recommended_action\":\"APPROVE|DECLINE|MESSAGE_FIRST\",\"rationale\":\"...\",\"message_draft\":\"...\"}.""",
         callback_handler=None,
     )
     decision = CancellationAgentDecision.model_validate_json(_json(agent(f"Review cancellation request for inquiry {inquiry_id}. The photographer makes the final decision.")))

@@ -2,7 +2,7 @@
 
 ### From “I have a photoshoot idea” to “we’re booked.”
 
-ShotCraft is an AI-assisted workspace for photographers and their clients. A client describes the shoot they want; ShotCraft gathers missing details, creates visual direction and a production plan, checks the photographer’s calendar, and helps both people agree on a time. When plans change, the same workspace helps negotiate a new slot or review a cancellation—without silently changing a booking.
+ShotCraft is an AI-assisted workspace for photographers and their clients. A client describes the shoot they want; ShotCraft gathers missing details, creates visual direction and a shoot plan, checks the photographer’s calendar, and helps both people agree on a time. When plans change, the same workspace helps negotiate a new slot or review a cancellation—without silently changing a booking.
 
 **Built for the [Agents for Humans Hackathon](https://agentsforhumans.devpost.com/) · Professional Agents track.**
 
@@ -16,7 +16,7 @@ Planning one photoshoot can mean scattered messages about style, wardrobe, locat
 
 1. **Client sends an inquiry.** They describe the concept, requested date, preferred time windows, duration, budget, and other details.
 2. **ShotCraft fills the gaps.** A Strands-backed intake step identifies missing information and asks targeted follow-up questions.
-3. **The creative direction takes shape.** A tool-using Strands coordinator reads the inquiry and follow-up history, invokes brief and moodboard specialists, and saves each artifact as it finishes. A separate image-generation provider renders the visual references; the production pack is then drafted for photographer review.
+3. **The creative direction takes shape.** A tool-using Strands coordinator reads the inquiry and follow-up history, invokes brief and moodboard specialists, and saves each artifact as it finishes. A separate image-generation provider renders the visual references; the shoot plan is then drafted for photographer review.
 4. **The photographer reviews the plan and times.** A tool-using Strands scheduling agent reads the shoot context and confirmed bookings, asks a deterministic availability tool for duration-matched options, and ranks safe candidates. The photographer can edit the plan and choose what to send.
 5. **The client confirms.** They review the plan and time options, accept the displayed cancellation policy, and select a time. Availability is checked again before the booking is saved.
 6. **Changes stay coordinated.** A client can request a new date/time preference or cancellation. The booking stays intact while Strands prepares a review and the photographer decides what to do next.
@@ -145,7 +145,7 @@ Open [http://localhost:8000](http://localhost:8000). Create one **photographer**
 ### Five-minute judge walkthrough
 
 1. As the **client**, submit an inquiry for a 60-minute shoot with a date and a broader preferred window. Complete any follow-up questions.
-2. As the **photographer**, open the project. Watch the planning progress, review the rendered moodboard and editable production plan, and inspect the scheduling checks and proposed one-hour slots.
+2. As the **photographer**, open the project. Watch the planning progress, review the rendered moodboard and editable shoot plan, and inspect the scheduling checks and proposed one-hour slots.
 3. Share the plan and up to three time options. As the **client**, review the plan, accept the cancellation policy, and choose one option.
 4. As the **client**, request a time change with new date/window preferences. As the **photographer**, review the protected current booking and conflict-free alternatives before sending them. Accept one as the client to update the shoot.
 5. For the exception path, request cancellation on a scheduled shoot. As the photographer, open the Strands cancellation review, inspect the recommendation and policy guidance, then **message first**, **approve**, or **decline**. Messaging keeps the request pending; approval releases the calendar slot.
