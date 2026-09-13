@@ -1,0 +1,84 @@
+/* Final single-column composition for New Inquiry. */
+.main:has(.inquiry-create-shell) {
+  max-width: 1080px;
+}
+
+.inquiry-create-head,
+.inquiry-create-card {
+  max-width: 900px;
+}
+
+.inquiry-create-shell {
+  grid-template-columns: 1fr;
+  gap: 15px;
+}
+
+.inquiry-submit-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 28px;
+  padding: 24px 28px;
+  border: 1px solid #dcd5e5;
+  border-radius: 18px;
+  background: linear-gradient(115deg, #fff, #faf8ff);
+  box-shadow: 0 16px 44px rgba(53, 40, 78, .08);
+}
+
+.inquiry-submit-footer h2 {
+  margin: 5px 0 4px;
+  font: 500 25px/1.05 Georgia, serif;
+  letter-spacing: -.025em;
+}
+
+.inquiry-submit-footer p {
+  margin: 0;
+  color: #776f7b;
+  font-size: 11px;
+}
+
+.inquiry-submit-footer .profile-card-kicker {
+  color: #7057c7;
+}
+
+.inquiry-submit-footer .actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex: 0 0 auto;
+  margin: 0;
+}
+
+.inquiry-submit-footer .primary {
+  min-width: 205px;
+  padding: 13px 20px;
+  background: #7057c7;
+}
+
+.inquiry-submit-footer #formStatus {
+  max-width: 240px;
+  font-size: 10px;
+  text-align: right;
+}
+
+@media (max-width: 680px) {
+  .inquiry-submit-footer {
+    align-items: stretch;
+    flex-direction: column;
+    padding: 22px;
+  }
+
+  .inquiry-submit-footer .actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .inquiry-submit-footer .primary {
+    width: 100%;
+  }
+
+  .inquiry-submit-footer #formStatus {
+    max-width: none;
+    text-align: left;
+  }
+}

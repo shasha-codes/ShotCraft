@@ -1,0 +1,31 @@
+/* Final layout corrections for the photographer profile workspace. */
+.photographer-app .profile-page .profile-layout {
+  align-items: stretch;
+}
+
+.photographer-app .profile-page .profile-identity-card {
+  position: relative;
+  top: auto;
+  align-self: stretch;
+  display: flex;
+  height: 100%;
+  flex-direction: column;
+}
+
+.photographer-app .profile-page .profile-picture-field {
+  display: block !important;
+}
+
+.photographer-app .profile-page .profile-picture-preview {
+  margin: 0 auto 26px !important;
+}
+
+.photographer-app .profile-page .profile-identity-note {
+  margin-top: auto;
+}
+
+@media (max-width: 850px) {
+  .photographer-app .profile-page .profile-identity-card {
+    height: auto;
+  }
+}

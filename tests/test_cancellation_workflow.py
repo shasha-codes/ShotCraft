@@ -112,6 +112,101 @@ class CancellationWorkflowTests(unittest.TestCase):
         self.assertEqual(storage.get_inquiry(self.inquiry_id)["status"], "SCHEDULED")
         self.assertEqual(storage.get_inquiry(self.inquiry_id)["cancellation_status"], "PENDING")
 
+    def test_cancellation_draft_is_returned_unchanged_and_placeholder_is_flagged(self):
+        storage.save_cancellation_agent_review(self.inquiry_id, "COMPLETE", {
+            "decision": {
+                "recommended_action": "APPROVE",
+                "rationale": "Within the policy.",
+                "message_draft": "I can help with this cancellation. Best regards, [Photographer's Name]",
+            },
+        })
+        photographer = SimpleNamespace(state=SimpleNamespace(user={
+            "user_type": "photographer", "email": "photo@example.com", "name": "Alex Rivera",
+        }))
+        result = main.cancellation_agent_review(self.inquiry_id, photographer)
+        draft = result["review"]["decision"]["message_draft"]
+        self.assertEqual(draft, "I can help with this cancellation. Best regards, [Photographer's Name]")
+        self.assertIn("draft_issue", result)
+
+    def test_cancellation_draft_with_relative_date_is_flagged_not_rewritten(self):
+        storage.save_cancellation_agent_review(self.inquiry_id, "COMPLETE", {
+            "decision": {
+                "recommended_action": "APPROVE",
+                "rationale": "Within the policy.",
+                "message_draft": "Your Seattle shoot is scheduled for today at 10 AM.\n\nBest regards,\nAlex Rivera\nphoto@example.com",
+            },
+            "agent_execution": "local-strands",
+        })
+        photographer = SimpleNamespace(state=SimpleNamespace(user={
+            "user_type": "photographer", "email": "photo@example.com", "name": "Alex Rivera",
+        }))
+        result = main.cancellation_agent_review(self.inquiry_id, photographer)
+        draft = result["review"]["decision"]["message_draft"]
+        self.assertIn("scheduled for today", draft)
+        self.assertEqual(draft.count("photo@example.com"), 1)
+        self.assertIn("relative shoot date", result["draft_issue"])
+
+    def test_cancellation_draft_with_alternate_placeholder_is_flagged(self):
+        storage.save_cancellation_agent_review(self.inquiry_id, "COMPLETE", {
+            "decision": {
+                "recommended_action": "APPROVE",
+                "rationale": "Within the policy.",
+                "message_draft": "We can approve your request. Best regards, [Photographer Name] (ShotCraft)",
+            },
+        })
+        photographer = SimpleNamespace(state=SimpleNamespace(user={
+            "user_type": "photographer", "email": "photo@example.com", "name": "Alex Rivera",
+        }))
+        result = main.cancellation_agent_review(self.inquiry_id, photographer)
+        draft = result["review"]["decision"]["message_draft"]
+        self.assertIn("[Photographer Name]", draft)
+        self.assertIn("draft_issue", result)
+        self.assertEqual(draft.lower().count("best regards"), 1)
+
+    def test_cancellation_draft_with_company_placeholder_is_flagged_not_rewritten(self):
+        storage.save_cancellation_agent_review(self.inquiry_id, "COMPLETE", {
+            "decision": {
+                "recommended_action": "APPROVE",
+                "rationale": "Within the policy.",
+                "message_draft": "Your cancellation was approved and you will receive a full refund of $400. We will process the refund within the next 5‑7 business days. Best regards, [Your Company Name] Team",
+            },
+        })
+        photographer = SimpleNamespace(state=SimpleNamespace(user={
+            "user_type": "photographer", "email": "photo@example.com", "name": "Alex Rivera",
+        }))
+        result = main.cancellation_agent_review(self.inquiry_id, photographer)
+        draft = result["review"]["decision"]["message_draft"]
+        self.assertIn("5‑7 business days", draft)
+        self.assertIn("Company Name", draft)
+        self.assertIn("draft_issue", result)
+        self.assertEqual(draft.lower().count("best regards"), 1)
+
+    def test_cancellation_agent_receives_photographer_account_identity(self):
+        self.assertTrue(storage.request_cancellation(self.inquiry_id, "Plans changed", None, 0, 400, 72))
+        with patch.object(main, "get_photographer_identity", return_value={"name": "Alex Rivera", "email": "photo@example.com"}):
+            def fake_agent(_id, get_booking, get_policy, get_request, get_history):
+                self.assertEqual(get_booking()["photographer_name"], "Alex Rivera")
+                self.assertEqual(get_booking()["photographer_email"], "photo@example.com")
+                return {"decision": {"recommended_action": "APPROVE", "rationale": "Within policy.", "message_draft": "I can approve your request.\n\nBest regards,\nAlex Rivera\nphoto@example.com"}, "activity": []}
+            with patch.object(main, "coordinate_cancellation_review", side_effect=fake_agent):
+                main.run_cancellation_agent_review(self.inquiry_id)
+        photographer = SimpleNamespace(state=SimpleNamespace(user={"user_type": "photographer", "email": "photo@example.com", "name": "Alex Rivera"}))
+        result = main.cancellation_agent_review(self.inquiry_id, photographer)
+        self.assertNotIn("draft_issue", result)
+        self.assertEqual(result["review"]["decision"]["message_draft"], "I can approve your request.\n\nBest regards,\nAlex Rivera\nphoto@example.com")
+
+    def test_photographer_can_queue_ai_regeneration_for_old_draft(self):
+        self.assertTrue(storage.request_cancellation(self.inquiry_id, "Plans changed", None, 0, 400, 72))
+        storage.save_cancellation_agent_review(self.inquiry_id, "COMPLETE", {
+            "decision": {"recommended_action": "APPROVE", "rationale": "Within policy.", "message_draft": "Best regards, [Your Company Name]"},
+        })
+        tasks = SimpleNamespace(pending=[], add_task=lambda function, *args: tasks.pending.append((function, args)))
+        photographer = SimpleNamespace(state=SimpleNamespace(user={"user_type": "photographer", "email": "photo@example.com", "name": "Alex Rivera"}))
+        response = main.regenerate_cancellation_agent_review(self.inquiry_id, photographer, tasks)
+        self.assertEqual(response["status"], "RUNNING")
+        self.assertEqual(storage.get_cancellation_agent_review(self.inquiry_id)["status"], "RUNNING")
+        self.assertEqual(tasks.pending[0][0], main.run_cancellation_agent_review)
+
     def test_message_first_and_client_reply_are_visible_without_closing_request(self):
         self.assertTrue(storage.request_cancellation(self.inquiry_id, "Plans changed", None, 100, 300, 30))
         storage.update_planning_workflow(self.inquiry_id, "CANCELLATION_REVIEW", "WAITING_FOR_PHOTOGRAPHER", "Ready for review")
