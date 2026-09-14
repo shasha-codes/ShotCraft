@@ -24,6 +24,7 @@ from urllib.request import Request as UrlRequest, urlopen
 
 from .agent import assess_change_request, build_production_pack, coordinate_cancellation_review, coordinate_creative_direction, coordinate_inquiry_intake, coordinate_schedule_slots, create_creative_brief, create_moodboard, draft_change_client_update, recommend_next_shoot_ideas
 from .images import generate_moodboard_images, public_image_error
+from .image_storage import load_generated_image
 from .models import (
     BriefRequest,
     CreativeBrief,
@@ -144,6 +145,15 @@ async def prevent_workspace_bundle_caching(request: Request, call_next):
 
 
 app.mount("/static", StaticFiles(directory="static"), name="static")
+
+
+@app.get("/generated/{filename}", include_in_schema=False)
+def generated_image(filename: str) -> Response:
+    """Serve immutable image URLs from S3, or the same-host local fallback."""
+    image_data = load_generated_image(filename)
+    if image_data is None:
+        raise HTTPException(status_code=404, detail="Image not found.")
+    return Response(image_data, media_type="image/jpeg", headers={"Cache-Control": "public, max-age=86400, immutable"})
 
 @app.get("/favicon.ico", include_in_schema=False)
 def favicon():

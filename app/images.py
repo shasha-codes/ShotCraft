@@ -6,18 +6,17 @@ import re
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from pathlib import Path
 
 from openai import OpenAI
 from dotenv import load_dotenv
 
 from .models import Moodboard, GeneratedMoodboard, GeneratedTile
+from .image_storage import save_generated_image
 
 load_dotenv()
 
 MODEL_ID = os.getenv("SHOTCRAFT_IMAGE_MODEL", "gpt-image-2.5-flare")
 MAX_CONCURRENT_RENDERS = max(1, min(int(os.getenv("SHOTCRAFT_IMAGE_CONCURRENCY", "2")), 4))
-OUTPUT_DIR = Path(__file__).resolve().parent.parent / "static" / "generated"
 
 
 def _was_moderation_blocked(exc: Exception) -> bool:
@@ -107,8 +106,7 @@ def _render_tile(tile, subject: str) -> GeneratedTile:
                 raise RuntimeError("The image provider returned no image data.")
             image_data = base64.b64decode(result.data[0].b64_json)
             filename = f"{uuid.uuid4().hex}.jpg"
-            (OUTPUT_DIR / filename).write_bytes(image_data)
-            return GeneratedTile(title=tile.title, image_url=f"/static/generated/{filename}")
+            return GeneratedTile(title=tile.title, image_url=save_generated_image(filename, image_data))
         except Exception as exc:
             last_error = exc
             if _was_moderation_blocked(exc) and not safety_retry_used:
@@ -125,7 +123,6 @@ def _render_tile(tile, subject: str) -> GeneratedTile:
 
 def generate_moodboard_images(moodboard: Moodboard, on_tile=None) -> GeneratedMoodboard:
     """Render moodboard tiles concurrently, retaining their planned display order."""
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     tiles = moodboard.tiles
     if not tiles:
         return GeneratedMoodboard(title=moodboard.title, model_id=MODEL_ID, tiles=[])
