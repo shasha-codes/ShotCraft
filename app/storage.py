@@ -553,11 +553,14 @@ def list_client_notifications(client_email: str) -> list[dict]:
         # Remove message notifications created by earlier versions, including
         # unread ones, so the bell count reflects workflow updates only.
         db.execute("DELETE FROM client_notifications WHERE lower(client_email)=? AND notification_type='NEW_MESSAGE'", (email,))
+        # Needs you is the single surface for unresolved client decisions.
+        # Remove decision notifications created by older deployments as well.
+        db.execute("DELETE FROM client_notifications WHERE lower(client_email)=? AND action_required=1", (email,))
         inquiries = db.execute("SELECT * FROM inquiries WHERE lower(client_email)=?", (email,)).fetchall()
-        active_keys: set[str] = set()
 
         def add(record, kind: str, key: str, heading: str, body: str, view: str, action: bool, created_at: str | None = None) -> None:
-            active_keys.add(key)
+            if action:
+                return
             db.execute("""INSERT OR IGNORE INTO client_notifications
                 (client_email, inquiry_id, notification_type, event_key, title, body, target_view, action_required, created_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, CURRENT_TIMESTAMP))""",
@@ -607,10 +610,6 @@ def list_client_notifications(client_email: str) -> list[dict]:
                 decided_at = record["cancellation_reviewed_at"] or record["updated_at"]
                 add(record, "CANCELLATION_DECLINED", f"cancellation-declined:{inquiry_id}:{decided_at}", "Cancellation request declined", f"Your booking for {project} remains scheduled. View the photographer's decision.", "details", False, decided_at)
 
-        actionable = db.execute("SELECT event_key FROM client_notifications WHERE client_email=? AND action_required=1 AND resolved_at IS NULL", (email,)).fetchall()
-        for row in actionable:
-            if row["event_key"] not in active_keys:
-                db.execute("UPDATE client_notifications SET resolved_at=CURRENT_TIMESTAMP WHERE event_key=?", (row["event_key"],))
         _refresh_legacy_plan_notification_copy(db, "client_notifications", "client_email", email)
         db.commit()
         rows = db.execute("SELECT * FROM client_notifications WHERE client_email=? ORDER BY datetime(created_at) DESC, id DESC", (email,)).fetchall()
@@ -638,10 +637,12 @@ def list_photographer_notifications(photographer_email: str) -> list[dict]:
         _ensure_schema(db)
         db.execute("DELETE FROM photographer_notifications WHERE lower(photographer_email)=? AND notification_type='NEW_MESSAGE'", (email,))
         rows = db.execute("SELECT * FROM inquiries ORDER BY id DESC").fetchall()
-        active_keys: set[str] = set()
 
         def add(record, kind: str, key: str, heading: str, body: str, view: str, action: bool, created_at: str | None = None) -> None:
-            active_keys.add(key)
+            # Decisions are already visible in Needs you and Projects. Do not
+            # duplicate them as notifications; ordinary messages stay in Messages.
+            if action:
+                return
             db.execute("""INSERT OR IGNORE INTO photographer_notifications
                 (photographer_email, inquiry_id, notification_type, event_key, title, body, target_view, action_required, created_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, CURRENT_TIMESTAMP))""",
@@ -688,10 +689,10 @@ def list_photographer_notifications(photographer_email: str) -> list[dict]:
             if record["status"] == "SCHEDULED" and record["call_time"]:
                 add(record, "SHOOT_CONFIRMED", f"photographer-confirmed:{inquiry_id}:{record['call_time']}", "Shoot confirmed", f"{project} is confirmed and on your schedule.", "project", False, record["updated_at"])
 
-        actionable = db.execute("SELECT event_key FROM photographer_notifications WHERE photographer_email=? AND action_required=1 AND resolved_at IS NULL", (email,)).fetchall()
-        for row in actionable:
-            if row["event_key"] not in active_keys:
-                db.execute("UPDATE photographer_notifications SET resolved_at=CURRENT_TIMESTAMP WHERE event_key=?", (row["event_key"],))
+        # Resolve notifications from older deployments when their decision is
+        # now represented by the Needs you queue instead.
+        db.execute("UPDATE photographer_notifications SET resolved_at=COALESCE(resolved_at, CURRENT_TIMESTAMP) "
+                   "WHERE photographer_email=? AND action_required=1", (email,))
         _refresh_legacy_plan_notification_copy(db, "photographer_notifications", "photographer_email", email)
         db.commit()
         notifications = db.execute("SELECT * FROM photographer_notifications WHERE photographer_email=? ORDER BY datetime(created_at) DESC, id DESC", (email,)).fetchall()

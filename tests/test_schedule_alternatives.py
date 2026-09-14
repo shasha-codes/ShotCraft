@@ -30,6 +30,21 @@ class ScheduleAlternativeTests(unittest.TestCase):
         self.assertTrue(all(slot["outside_preferred_window"] for slot in slots))
         self.assertTrue(all(slot["starts_at"].startswith("2026-09-14") for slot in slots))
 
+    def test_later_same_day_includes_slot_ending_at_midnight(self):
+        inquiry = self.inquiry.model_copy(update={"availability_windows": ["20:00–23:00"]})
+        record = {"payload": inquiry.model_dump_json()}
+        busy = [{"inquiry_id": 2, "starts_at": "2026-09-14T20:00", "ends_at": "2026-09-14T22:00"}]
+        with (
+            patch.object(main, "scheduled_times", return_value=busy),
+            patch.object(main, "get_change_request", return_value=None),
+            patch.object(main, "coordinate_schedule_slots", side_effect=RuntimeError("agent unavailable")),
+        ):
+            slots = main._recommend_schedule_for_record(1, record)
+        self.assertEqual(len(slots), 1)
+        self.assertEqual(slots[0]["starts_at"], "2026-09-14T23:00")
+        self.assertEqual(slots[0]["ends_at"], "2026-09-15T00:00")
+        self.assertTrue(slots[0]["outside_preferred_window"])
+
     def test_full_day_does_not_suggest_another_date(self):
         busy = [{"inquiry_id": 2, "starts_at": "2026-09-14T09:00", "ends_at": "2026-09-15T00:00"}]
         with (

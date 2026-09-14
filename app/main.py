@@ -18,6 +18,7 @@ import threading
 import uuid
 import os
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from urllib.parse import urlencode
 from urllib.request import Request as UrlRequest, urlopen
@@ -467,16 +468,25 @@ def process_inquiry(inquiry_id: int, inquiry: Inquiry) -> None:
                         "status": "generating", "job_id": draft_job_id,
                     })
 
-                generated = generate_moodboard_images(moodboard, on_tile=save_completed_tile)
+                def prepare_production_pack() -> ProductionPack:
+                    try:
+                        return build_production_pack(inquiry, {"moodboard": moodboard.model_dump()})
+                    except Exception as exc:
+                        print(f"[ShotCraft draft shoot plan] Generation failed: {exc}")
+                        return _fallback_production_pack(inquiry, {"moodboard": moodboard.model_dump()})
+
+                # The production pack depends on the structured moodboard plan,
+                # not on rendered image bytes. Build both artifacts at once, but
+                # publish neither as complete until both branches succeed.
+                update_planning_workflow(inquiry_id, "GENERATING_ASSETS", "RUNNING", "Rendering moodboard images and building the shoot plan in parallel")
+                with ThreadPoolExecutor(max_workers=1, thread_name_prefix="shotcraft-plan") as pool:
+                    production_future = pool.submit(prepare_production_pack)
+                    generated = generate_moodboard_images(moodboard, on_tile=save_completed_tile)
+                    pack = production_future.result()
                 save_moodboard(inquiry_id, {"moodboard": moodboard.model_dump(), "generated": generated.model_dump(), "status": "complete", "job_id": draft_job_id})
-                update_planning_workflow(inquiry_id, "BUILDING_PLAN", "RUNNING", "Generated and verified all moodboard images")
+                update_planning_workflow(inquiry_id, "BUILDING_PLAN", "RUNNING", "Generated moodboard images and completed the shoot plan")
                 with _moodboard_jobs_lock:
                     _moodboard_jobs[draft_job_id]["status"] = "complete"
-                try:
-                    pack = build_production_pack(inquiry, {"moodboard": moodboard.model_dump()})
-                except Exception as exc:
-                    print(f"[ShotCraft draft shoot plan] Generation failed: {exc}")
-                    pack = _fallback_production_pack(inquiry, {"moodboard": moodboard.model_dump()})
                 save_production_pack(inquiry_id, pack.model_dump(), draft=True)
                 record_event(inquiry_id, "DRAFT_PLAN_READY")
                 update_analysis(inquiry_id, "READY_FOR_REVIEW", result.model_dump())
@@ -1101,7 +1111,10 @@ def _later_same_day_schedule_slots(record: dict, busy: list[dict], preferred_dat
     first_minute = ((max(end for _, end in parsed_windows) + 29) // 30) * 30
     location = _inquiry_schedule_location(record)
     slots = []
-    for minute in range(first_minute, 24 * 60 - duration, 30):
+    # Include the final slot that ends exactly at midnight. ``range`` excludes
+    # its stop value, so without the +1 a valid 23:00–00:00 option (for a
+    # 60-minute shoot) is incorrectly discarded.
+    for minute in range(first_minute, 24 * 60 - duration + 1, 30):
         start = preferred_date.replace(hour=minute // 60, minute=minute % 60)
         end = start + timedelta(minutes=duration)
         if _slots_overlap(start, end, busy) or any(start < _parse_datetime(slot["ends_at"]) and end > _parse_datetime(slot["starts_at"]) for slot in slots):

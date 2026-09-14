@@ -10,15 +10,15 @@ ShotCraft is an AI-assisted workspace for independent photographers and their cl
 
 Built for the [Agents for Humans Hackathon](https://agentsforhumans.devpost.com/) · **Professional Agents** track · Powered by the [Strands Agents SDK](https://strandsagents.com/)
 
-**Explore:** [How it works](#workflow) · [Human decisions](#human-decisions) · [Architecture](#system-architecture) · [Run locally](#local-setup) · [Judge walkthrough](#judge-demo)
+**Try it:** [Live ShotCraft app](https://shotcraft.online/) · [Architecture diagram](docs/architecture/architecture.png) · [Build story on AWS Builder Center](https://builder.aws.com/content/3JKwMR0xzcjZrvAxq45FBn6AKU2/agents-for-humans-building-shotcraft-with-strands-agents-and-amazon-bedrock)
+
+**Explore the repo:** [How it works](#one-inquiry-one-coordinated-workflow) · [Human decisions](#the-human-decision-boundary) · [Architecture](#architecture) · [Try the hosted app](#try-the-hosted-app) · [Run locally](#run-locally)
 
 ## Why this exists
 
 Planning a photoshoot often means piecing together a client's ideas, missing details, visual references, deliverables, availability, and last-minute changes across forms and messages. ShotCraft gives the photographer one prepared starting point and gives the client a clear path from idea to confirmed shoot.
 
 This is a workflow tool, not a chatbot that books on someone's behalf. Its purpose is to reduce repetitive preparation **without hiding consequential choices from either person**. We have not measured a time-savings figure; the demo shows the work the agent takes on and the decisions it leaves to humans.
-
-<a id="workflow"></a>
 
 ## One inquiry, one coordinated workflow
 
@@ -63,8 +63,6 @@ Blue steps are agent preparation, purple steps are human inputs or decisions, an
 
 The two workspaces show project progress, messages, notifications, and a **Needs you** queue for outstanding decisions. Ordinary messages stay in Messages rather than being duplicated as workflow notifications.
 
-<a id="human-decisions"></a>
-
 ### The human decision boundary
 
 Strands agents use scoped tools to gather facts and recommend next steps. They do **not** invent available times, send a plan, confirm a booking, calculate or collect a cancellation fee, or cancel a shoot themselves.
@@ -75,56 +73,15 @@ Strands agents use scoped tools to gather facts and recommend next steps. They d
 
 The application shows fee and refund **estimates**; it does not process payments or issue refunds.
 
-<a id="system-architecture"></a>
-
 ## Architecture
 
-This is the deployment at a glance. The colored boxes show **where each component lives**; the AgentCore zoom-in below shows the individual agents and tools.
+The architecture diagram shows the browser workspaces, EC2 application, AgentCore runtime, AWS services, external image provider, and the human decision boundary. The AgentCore zoom-in below adds detail about its tools and handoff to FastAPI.
 
-```mermaid
-flowchart LR
-    People["👥<br/>Client + photographer<br/>browser workspaces"] --> App
-
-    subgraph EC2["Amazon EC2 · ShotCraft application"]
-        App["🖥️<br/>ShotCraft app<br/>Nginx · FastAPI · UI<br/>rules · image jobs · SQLite on EBS<br/>local image fallback"]
-    end
-
-    subgraph Core["Amazon Bedrock AgentCore · agent runtime"]
-        Strands["🤖<br/>Strands agents<br/>scoped tools"]
-    end
-
-    subgraph AWS["AWS managed services"]
-        direction TB
-        Text["✨<br/>Bedrock text model<br/>Secrets Manager key"]
-        S3[("🗂️<br/>Private S3<br/>generated images")]
-    end
-
-    subgraph External["External provider"]
-        OpenAI["🎨<br/>OpenAI Images API<br/>image rendering"]
-    end
-
-    App <-->|"invoke / response"| Strands
-    Strands -->|"text reasoning"| Text
-    App <-->|"image requests / results"| OpenAI
-    App <-->|"private image reads / writes"| S3
-
-    style EC2 fill:#f4f0ff,stroke:#6b50c4,stroke-width:2px
-    style Core fill:#eef5ff,stroke:#4876b8,stroke-width:2px
-    style AWS fill:#eff9f4,stroke:#4b916a,stroke-width:2px
-    style External fill:#fff6eb,stroke:#c58b43,stroke-width:2px
-    style People fill:#ffffff,stroke:#d9d3e7,stroke-width:1.5px
-    style App fill:#ffffff,stroke:#cbbcf5,stroke-width:1.5px
-    style Strands fill:#ffffff,stroke:#bbd0ed,stroke-width:1.5px
-    style Text fill:#ffffff,stroke:#bddfc9,stroke-width:1.5px
-    style S3 fill:#ffffff,stroke:#bddfc9,stroke-width:1.5px
-    style OpenAI fill:#ffffff,stroke:#efd8b7,stroke-width:1.5px
-```
-
-Icons: [AWS architecture icon package](https://aws.amazon.com/architecture/icons/) and [OpenAI&#39;s verified organization mark](https://github.com/openai).
+![ShotCraft submission architecture diagram](docs/architecture/architecture.png)
 
 ### Inside the AgentCore boundary
 
-This zoom-in shows the key handoff. **FastAPI, not AgentCore, reads the database and calculates availability or policy amounts.** It sends only the facts needed for one operation. The AgentCore entrypoint selects the corresponding Strands agent; that agent calls tools scoped to the received JSON, uses Bedrock for text reasoning, and returns structured results. FastAPI owns validation, persistence, and any human handoff.
+This zoom-in shows the key handoff. **FastAPI reads the database and calculates availability or policy amounts.** It sends only the facts needed for one operation. The AgentCore entrypoint selects the corresponding Strands agent; that agent calls tools scoped to the received JSON, uses Bedrock for text reasoning, and returns structured results. FastAPI owns validation, persistence, and any human handoff.
 
 ```mermaid
 flowchart LR
@@ -164,43 +121,18 @@ flowchart LR
     style Bedrock fill:#eff9f4,stroke:#4b916a,stroke-width:2px
 ```
 
-The toolbox represents **four alternative operation-specific tool sets**, not four stages of every request:
+Each AgentCore request runs **one scoped Strands workflow**:
 
-| Operation           | Facts FastAPI supplies                                                                       | Tools available inside AgentCore                                                                                               | Returned to FastAPI                                   |
-| ------------------- | -------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------- |
-| Inquiry intake      | Inquiry and previous follow-up answers                                                       | `read_inquiry_context`, `read_followup_history`, `analyze_requirements` (Bedrock-backed specialist)                      | Structured assessment and follow-up questions         |
-| Creative direction  | Inquiry, follow-ups, and specialist prompts                                                  | `read_inquiry_context`, `read_followup_history`, `draft_creative_brief`, `plan_moodboard` (Bedrock-backed specialists) | Editable brief and moodboard *plan*, not image files |
-| Scheduling review   | Shoot context, confirmed bookings, and up to three **server-validated** candidates    | `read_shoot_context`, `read_confirmed_bookings`, `find_validated_candidates`                                             | Ranked IDs from the supplied candidates               |
-| Cancellation review | Confirmed booking, server-calculated policy guidance, client request, and project milestones | `review_cancellation_context`                                                                                                | Recommendation, rationale, and editable draft         |
-
-#### Ownership and boundaries
-
-| Boundary | What it owns | What it cannot do |
+| Workflow | What the agent reviews | What it returns |
 | --- | --- | --- |
-| **Browser** | Client and photographer interfaces | Call AgentCore, Bedrock, OpenAI, or S3 directly |
-| **EC2 · ShotCraft** | Nginx, FastAPI, static pages, workflow and booking rules, background image jobs, SQLite on EBS, and the local image mirror | Delegate persistence or final validation to an agent |
-| **AgentCore · Strands** | Scoped tools, specialist agents, text reasoning, and structured recommendations | Query SQLite directly, write to S3, call the OpenAI Images API, send messages, or commit bookings |
-| **Managed providers** | Bedrock text inference, OpenAI image rendering, Secrets Manager credentials, and private S3 objects | Publish a shoot plan or make a human decision |
+| Inquiry intake | Inquiry and follow-up answers | Missing details or a ready-to-plan assessment |
+| Creative direction | Completed inquiry and creative context | Editable brief and moodboard plan |
+| Scheduling review | Shoot details and server-validated openings | Ranked IDs of available options |
+| Cancellation review | Booking, client request, and server-calculated policy facts | Recommendation and editable message |
 
-> **Tool-free text operation:** `structured_completion` is a separate Strands call that drafts structured content from a supplied prompt without giving the agent access to tools.
+**Where decisions live:** The browser talks to FastAPI on EC2. FastAPI reads SQLite, calculates availability and policy estimates, and sends a bounded fact snapshot to AgentCore. Strands uses scoped tools and Amazon Bedrock for text reasoning, then returns structured results for FastAPI to validate. The agent cannot directly change bookings, send messages, or access the database. A separate, tool-free Strands operation handles some structured drafting.
 
-#### Text reasoning path
-
-1. **FastAPI prepares facts.** It reads application state and sends one bounded inquiry or scheduling snapshot with `InvokeAgentRuntime`.
-2. **AgentCore runs Strands.** The selected coordinator calls only the scoped tools and specialist agents for that operation.
-3. **Bedrock provides text reasoning.** The runtime uses an Amazon Bedrock model through its OpenAI-compatible Mantle endpoint and retrieves the Bedrock API key from Secrets Manager.
-4. **FastAPI takes control again.** AgentCore returns structured JSON; FastAPI validates and persists it before creating any human handoff.
-
-The `OpenAIModel` class is a protocol adapter for Bedrock. Despite its name, these text requests do **not** go to OpenAI.
-
-#### Moodboard image path
-
-1. **Strands plans the visual direction.** It returns a moodboard plan, not image files.
-2. **EC2 renders the images.** A background job calls the separate OpenAI Images API using the app's environment key.
-3. **ShotCraft stores both copies.** Each JPEG is uploaded to private S3 when configured and retained in the same-host local mirror.
-4. **FastAPI serves images safely.** For `/generated/` requests, it reads from S3 first and falls back to the local copy. The bucket exposes no public image URLs.
-
-> **Deployment and fallbacks:** The [EC2 runbook](deploy/EC2.md) describes the deployed configuration. AgentCore and S3 remain optional locally: Strands can fall back to the FastAPI process, and generated images remain on the local filesystem when S3 is unavailable. The local Strands fallback requires a Bedrock bearer token on the app host.
+**Where images live:** Strands produces the moodboard *plan*; a background job on EC2 calls the OpenAI Images API to render it. FastAPI stores generated images in private S3 and a local mirror, serving the local copy if S3 is unavailable.
 
 ### Flow 1 · From inquiry to an editable shoot plan
 
@@ -225,12 +157,16 @@ sequenceDiagram
     else Ready to plan
         API->>Agent: Coordinate creative direction
         Agent->>Tools: Read context, draft brief, plan moodboard
-        Tools-->>API: Save brief and moodboard plan as completed
-        API->>Images: Render planned visual references
-        Images-->>API: Generated images
-        API->>Agent: Generate draft shoot plan from inquiry and moodboard
-        Agent-->>API: Structured shoot plan
-        API->>API: Save editable draft
+        Agent-->>API: Return brief and moodboard plan
+        API->>API: Save completed brief and visual plan
+        par Render moodboard images
+            API->>Images: Render planned visual references
+            Images-->>API: Generated images
+        and Draft shoot plan
+            API->>Agent: Generate draft shoot plan from inquiry and moodboard plan
+            Agent-->>API: Structured shoot plan
+        end
+        API->>API: Save each completed artifact
         API-->>Photographer: Review creative direction and plan
     end
 ```
@@ -270,55 +206,48 @@ sequenceDiagram
 
 For a time change, the same checks also read the existing booking and prior preference rounds; the original booking stays protected until a client-approved replacement passes the final recheck. If agent ranking fails, the photographer sees deterministic, conflict-checked options instead.
 
-The two sequence diagrams show the AgentCore path. Local Strands follows the same decision boundaries when used as a fallback.
+The two sequence diagrams show the deployed AgentCore path. Local Strands uses the same human decision boundaries.
 
-<a id="local-setup"></a>
+## Try the hosted app
 
-## Run it locally
+Open [shotcraft.online](https://shotcraft.online/). You can create your own test accounts; no local installation or pre-issued credentials are needed. Use two browser profiles (or a normal and private window) to keep the roles signed in at the same time.
 
-You need Python 3.11+, access to the configured Amazon Bedrock text model, and an OpenAI API key to render moodboard images. Both providers are needed for the full inquiry-to-moodboard flow.
+1. **Create a photographer account** with a city and a password of at least eight characters.
+2. **Create a client account.** Select **New inquiry**, choose the same city, then select your photographer from the list. Describe a shoot, choose a date and time window, and submit it.
+3. **Complete any follow-up questions** in the client workspace. ShotCraft prepares a brief, visual moodboard, and draft shoot plan; image generation can take a few minutes.
+4. **Switch to the photographer workspace** to review and edit the plan, inspect calendar-checked options, and share the plan and times with the client.
+5. **Return as the client** to approve the plan and choose an offered time. ShotCraft rechecks availability before confirming the booking.
 
-```bas
-python3 -m venv .venv
+To explore the exception flow, request a time change or cancellation as the client and review the pending decision as the photographer. The application shows policy estimates but does not process payments.
+
+## Run locally
+
+You need Python 3.11+, access to the configured [Amazon Bedrock text model and API key](https://docs.aws.amazon.com/bedrock/latest/userguide/api-keys.html), and an OpenAI API key for moodboard images. From the repository root:
+
+```bash
+python3.11 -m venv .venv
 source .venv/bin/activate
-pip install -r requirements.txt
+python -m pip install -r requirements.txt
 cp .env.example .env
 ```
-For **local Strands execution**, set at least these values in `.env`:
+
+Edit `.env` and set these values for local Strands execution:
+
 ```dotenv
 AWS_REGION=us-west-2
 AWS_BEARER_TOKEN_BEDROCK=your_bedrock_api_key
-SHOTCRAFT_MODEL=openai.gpt-oss-120b-1:0
 OPENAI_API_KEY=your_openai_api_key
-SHOTCRAFT_IMAGE_MODEL=gpt-image-2.5-flare
 ```
-The Bedrock bearer token is needed by the local text-agent path. `AWS_PROFILE` instead supplies AWS SDK credentials for services such as S3 or AgentCore; it does not replace that token for local text calls. To use a deployed AgentCore runtime, set `SHOTCRAFT_AGENTCORE_ENABLED=true` and `SHOTCRAFT_AGENTCORE_RUNTIME_ARN` as shown in [.env.example](.env.example). Make sure the app's AWS credentials can invoke that runtime. If a remote call falls back to local Strands, the local text path still needs the Bedrock bearer token. Never commit real credentials.
 
-Start the app:
+The model IDs and image model are already in `.env.example`; use models available to your account and Region if you change them. Comment out the example `AWS_PROFILE=strands-dev` unless that profile exists on your machine. The Bedrock bearer token is required for local text calls; an AWS CLI profile alone does not replace it. Keep `.env` private and never commit credentials.
+
+Start the server, then follow the [hosted-app walkthrough](#try-the-hosted-app) at [http://127.0.0.1:8000](http://127.0.0.1:8000):
 
 ```bash
 uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
 ```
 
-Open [http://localhost:8000](http://localhost:8000), create a **photographer** account and a **client** account, and use separate browser profiles (or sign out between roles). `/healthz` checks only that the web service is running; `python smoke_test.py` exercises the live text provider. Moodboard images can take a few minutes to render.
-
-### Optional S3 storage for generated images
-
-Without S3, images are saved to `static/generated/`. To use a private bucket, set `SHOTCRAFT_IMAGE_S3_BUCKET` in `.env`; optionally set `SHOTCRAFT_IMAGE_S3_PREFIX` (default: `generated/`). The AWS profile or instance role needs `s3:PutObject` and `s3:GetObject` on `arn:aws:s3:::YOUR_BUCKET/generated/*`, adjusted if you change the prefix. Keep Block Public Access enabled and use a bucket in `AWS_REGION`.
-
-New images are uploaded to S3 and mirrored locally. The `/generated/` route reads S3 first, falling back to the local copy if the read fails. Failed uploads are logged and **not** backfilled automatically; older `/static/generated/` links remain local. The fallback is same-host only, so a multi-instance or ephemeral deployment needs durable shared storage. Restart the app after changing `.env` so the running process picks up the new settings.
-
-<a id="judge-demo"></a>
-
-## Five-minute judge walkthrough
-
-1. **Client:** submit an inquiry for a 60-minute shoot with a preferred date and broad time window; answer any follow-up questions.
-2. **Photographer:** watch the brief and moodboard arrive, inspect the editable shoot plan, and review the calendar-checked time options. Share the plan.
-3. **Client:** review the plan, accept the displayed cancellation policy, and choose one offered time. The booking is checked again before confirmation.
-4. **Change of plans:** request a new time as the client; show the photographer the alternatives while the original booking stays protected. Confirm the replacement time.
-5. **Exception:** request cancellation; show the agent's evidence-backed recommendation and policy estimate, then make the final decision as the photographer.
-
-The live agent verifiers below can show that Strands actually called its tools; the browser walkthrough shows the human approvals those verifiers do not cover.
+S3 is **not required locally**: generated images are saved in `static/generated/`. If you want the local app to invoke a deployed AgentCore runtime, set `SHOTCRAFT_AGENTCORE_ENABLED=true` and `SHOTCRAFT_AGENTCORE_RUNTIME_ARN` in `.env` and provide AWS SDK credentials with permission to invoke it. The [EC2 deployment runbook](deploy/EC2.md) covers the hosted configuration and private S3 storage.
 
 ## Verify the implementation
 

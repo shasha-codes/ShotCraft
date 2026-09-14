@@ -8,3 +8,13 @@
 
 /* Keep the signed-in header from competing with the centred navigation. */
 .site-header{display:flex}.site-header .logo{flex:0 0 auto}.site-header nav{margin-left:auto}.auth-links{margin-left:clamp(20px,3vw,56px);flex:0 0 auto}.auth-links .signup{display:inline-flex;align-items:center;white-space:nowrap}@media(max-width:1250px){.site-header nav{display:none}.auth-links{margin-left:auto}}@media(max-width:980px){.auth-links .signed-in{display:none}}@media(max-width:560px){.site-header{padding-left:20px;padding-right:20px}.site-header .logo{font-size:21px}.auth-links{gap:9px}.auth-links .signup{padding:10px 12px}.auth-links .signup span{margin-left:8px}}
+
+/* The portrait is 3:2. On tall, narrow desktop windows, cap the hero to that
+   natural frame so a contained image does not expose a second enlarged copy. */
+.hero{background:#15131a}
+@media(min-width:851px){
+  .hero{min-height:720px;height:min(100svh,66.64vw)}
+}
+@media(max-width:850px){
+  .hero-image{object-fit:cover;object-position:68% center}
+}

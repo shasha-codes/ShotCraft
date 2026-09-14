@@ -21,6 +21,7 @@ if MODEL_ID == "openai.gpt-oss-120b":
     MODEL_ID = "openai.gpt-oss-120b-1:0"
 PLANNING_MODEL_ID = os.getenv("SHOTCRAFT_PLANNING_MODEL", MODEL_ID)
 INTAKE_MODEL_ID = os.getenv("SHOTCRAFT_INTAKE_MODEL", MODEL_ID)
+COORDINATOR_MODEL_ID = os.getenv("SHOTCRAFT_COORDINATOR_MODEL", INTAKE_MODEL_ID)
 BEDROCK_API_KEY = os.getenv("AWS_BEARER_TOKEN_BEDROCK")
 BEDROCK_REGION = os.getenv("AWS_REGION", "us-west-2")
 BEDROCK_OPENAI_ENDPOINT = os.getenv("SHOTCRAFT_BEDROCK_ENDPOINT", f"https://bedrock-mantle.{BEDROCK_REGION}.api.aws/v1")
@@ -44,8 +45,10 @@ def _invoke_agentcore(payload: dict) -> dict | None:
         for chunk in response.get("response", []):
             if isinstance(chunk, dict):
                 chunk = chunk.get("chunk", chunk.get("bytes", b""))
-            chunks.append(chunk if isinstance(chunk, str) else bytes(chunk).decode("utf-8"))
-        result = json.loads("".join(chunks))
+            chunks.append(chunk.encode("utf-8") if isinstance(chunk, str) else bytes(chunk))
+        # A transport chunk may end halfway through a multibyte UTF-8 character.
+        # Decode only after assembling the complete response body.
+        result = json.loads(b"".join(chunks).decode("utf-8"))
         if not isinstance(result, dict) or result.get("agent_execution") != "agentcore":
             raise ValueError("AgentCore response did not identify remote execution")
         result["agent_execution"] = "agentcore"
@@ -134,7 +137,13 @@ def build_production_pack(inquiry: Inquiry, moodboard: dict | None = None) -> Pr
 
 
 def coordinate_inquiry_intake(inquiry_id: int, inquiry: Inquiry, followups: list[dict]) -> dict:
-    """Use a Strands tool loop to collect the facts before intake analysis."""
+    """Use one bounded Strands tool loop to read and assess inquiry intake.
+
+    The coordinator used to call three tools and launch another model from the
+    final tool. That nested workflow added several sequential inference turns to
+    the client's critical path. The assessment agent now reads one authoritative
+    context tool and returns the same validated contract itself.
+    """
     if os.getenv("SHOTCRAFT_AGENTCORE_ENABLED", "").lower() in {"1", "true", "yes"}:
         remote = _invoke_agentcore({"operation": "inquiry_intake", "inquiry": inquiry.model_dump(), "followups": followups, "specialist_prompt": SYSTEM_PROMPT})
         if remote and "analysis" in remote:
@@ -144,42 +153,32 @@ def coordinate_inquiry_intake(inquiry_id: int, inquiry: Inquiry, followups: list
     if not BEDROCK_API_KEY:
         raise RuntimeError("AWS_BEARER_TOKEN_BEDROCK is required for inquiry coordination")
     activity: list[str] = []
-    state: dict = {"inquiry_read": False, "followups_read": False}
+    state: dict = {"context_read": False}
 
     @tool
-    def read_inquiry_context() -> str:
-        """Read the complete client inquiry, including scheduling and deliverable requirements."""
-        state["inquiry_read"] = True
+    def read_intake_context() -> str:
+        """Read the complete inquiry and all prior client follow-up responses."""
+        state["context_read"] = True
         activity.append("Read the complete client inquiry")
-        return inquiry.model_dump_json()
-
-    @tool
-    def read_followup_history() -> str:
-        """Read the client's previous responses to follow-up questions."""
-        state["followups_read"] = True
         activity.append(f"Reviewed {len(followups)} follow-up response{'s' if len(followups) != 1 else ''}")
-        return json.dumps(followups)
-
-    @tool
-    def analyze_requirements() -> str:
-        """Ask the Strands intake specialist which shoot details are still missing."""
-        if not state["inquiry_read"] or not state["followups_read"]:
-            return "Read the inquiry and follow-up history first."
-        if "analysis" not in state:
-            state["analysis"] = analyze_inquiry(inquiry, followups)
-            activity.append("Analyzed missing requirements and follow-up questions")
-        return state["analysis"].model_dump_json()
+        return json.dumps({"inquiry": inquiry.model_dump(), "client_followups": followups})
 
     agent = Agent(
         model=OpenAIModel(model_id=_openai_model_id(INTAKE_MODEL_ID), client_args={"api_key": BEDROCK_API_KEY, "base_url": BEDROCK_OPENAI_ENDPOINT}),
-        tools=[read_inquiry_context, read_followup_history, analyze_requirements],
-        system_prompt="""You coordinate ShotCraft inquiry intake. Call read_inquiry_context and read_followup_history, then call analyze_requirements. The specialist tool provides the authoritative structured assessment; do not invent or edit its result. If information is missing, the app will ask the client and pause before creative planning. Never book or send a plan yourself. Summarize the completed assessment in one sentence.""",
+        tools=[read_intake_context],
+        system_prompt=f"""{SYSTEM_PROMPT}
+
+You are operating as ShotCraft's bounded intake coordinator. You MUST call
+read_intake_context exactly once before assessing the request. Base the JSON only
+on that tool result. Never book, publish a plan, or contact anyone.""",
         callback_handler=None,
     )
-    agent(f"Assess inquiry {inquiry_id} using every required tool.")
-    if not all(state.get(key) for key in ("inquiry_read", "followups_read", "analysis")):
-        raise RuntimeError("The inquiry coordinator did not complete every required tool step")
-    return {"analysis": state["analysis"], "activity": activity, "agent_used_tools": True}
+    response = agent(f"Assess inquiry {inquiry_id}. Read the intake context, then return the required JSON.")
+    if not state["context_read"]:
+        raise RuntimeError("The inquiry coordinator did not complete the required intake-context tool step")
+    analysis = InquiryAnalysis.model_validate_json(_json(response))
+    activity.append("Analyzed missing requirements and follow-up questions")
+    return {"analysis": analysis, "activity": activity, "agent_used_tools": True}
 
 
 def coordinate_creative_direction(
@@ -252,7 +251,7 @@ def coordinate_creative_direction(
         return json.dumps({"title": state["moodboard"].title, "tiles": [tile.title for tile in state["moodboard"].tiles]})
 
     agent = Agent(
-        model=OpenAIModel(model_id=_openai_model_id(PLANNING_MODEL_ID), client_args={"api_key": BEDROCK_API_KEY, "base_url": BEDROCK_OPENAI_ENDPOINT}),
+        model=OpenAIModel(model_id=_openai_model_id(COORDINATOR_MODEL_ID), client_args={"api_key": BEDROCK_API_KEY, "base_url": BEDROCK_OPENAI_ENDPOINT}),
         tools=[read_inquiry_context, read_followup_history, draft_creative_brief, plan_moodboard],
         system_prompt="""You coordinate ShotCraft's creative planning. Call read_inquiry_context and read_followup_history first. Then call draft_creative_brief and plan_moodboard in that order. These specialist tools create the actual artifacts; do not invent their results. The photographer must review the final shoot plan. Never send anything to the client or confirm a booking. After all tools complete, summarize the prepared direction in one sentence.""",
         callback_handler=None,

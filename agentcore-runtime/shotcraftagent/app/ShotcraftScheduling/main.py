@@ -1,4 +1,5 @@
 import json
+import os
 from typing import Any
 
 from bedrock_agentcore.runtime import BedrockAgentCoreApp
@@ -7,6 +8,14 @@ from model.load import load_model
 
 app = BedrockAgentCoreApp()
 log = app.logger
+
+
+def _coordinator_model():
+    return load_model(os.environ.get("SHOTCRAFT_COORDINATOR_MODEL", "openai.gpt-oss-20b"))
+
+
+def _intake_model():
+    return load_model(os.environ.get("SHOTCRAFT_INTAKE_MODEL", "openai.gpt-oss-20b"))
 
 
 async def _json_agent(system_prompt: str, prompt: str) -> dict:
@@ -38,33 +47,30 @@ async def _inquiry_intake(payload: dict) -> dict:
     state: dict = {}
 
     @tool
-    def read_inquiry_context() -> str:
-        """Read the complete client inquiry."""
+    def read_intake_context() -> str:
+        """Read the complete inquiry and all prior client follow-up responses."""
         activity.append("Read the complete client inquiry")
-        state["inquiry_read"] = True
-        return json.dumps(inquiry)
-
-    @tool
-    def read_followup_history() -> str:
-        """Read all client follow-up responses."""
         activity.append(f"Reviewed {len(followups)} follow-up responses")
-        state["followups_read"] = True
-        return json.dumps(followups)
+        state["context_read"] = True
+        return json.dumps({"inquiry": inquiry, "client_followups": followups})
 
-    @tool
-    async def analyze_requirements() -> str:
-        """Create the authoritative structured inquiry assessment."""
-        if not state.get("inquiry_read") or not state.get("followups_read"):
-            return "Read inquiry and follow-ups first."
-        state["analysis"] = await _json_agent(specialist_prompt, f"Analyze this photography inquiry and all client follow-ups:\n{json.dumps({'inquiry': inquiry, 'client_followups': followups}, indent=2)}")
-        activity.append("Analyzed missing requirements and follow-up questions")
-        return json.dumps(state["analysis"])
-
-    coordinator = Agent(model=load_model(), tools=[read_inquiry_context, read_followup_history, analyze_requirements], system_prompt="Call all three tools in order. Never book, message, or invent facts. After the tools finish, briefly confirm completion.")
-    await coordinator.invoke_async("Coordinate inquiry intake using every required tool.")
-    if "analysis" not in state:
-        raise RuntimeError("intake did not complete every required tool")
-    return {"analysis": state["analysis"], "activity": activity, "agent_used_tools": True, "agent_execution": "agentcore"}
+    coordinator = Agent(
+        model=_intake_model(),
+        tools=[read_intake_context],
+        system_prompt=(
+            specialist_prompt
+            + "\n\nYou are operating as ShotCraft's bounded intake coordinator. "
+              "You MUST call read_intake_context exactly once before assessing the request. "
+              "Base the required JSON only on that tool result. Never book, publish a plan, or contact anyone."
+        ),
+    )
+    result = await coordinator.invoke_async("Read the intake context, assess missing details, and return only the required JSON.")
+    if not state.get("context_read"):
+        raise RuntimeError("intake agent did not read the intake context")
+    fence = chr(96) * 3
+    analysis = json.loads(str(result).strip().replace(fence + "json", "").replace(fence, "").strip())
+    activity.append("Analyzed missing requirements and follow-up questions")
+    return {"analysis": analysis, "activity": activity, "agent_used_tools": True, "agent_execution": "agentcore"}
 
 
 async def _creative_direction(payload: dict) -> dict:
@@ -110,7 +116,7 @@ async def _creative_direction(payload: dict) -> dict:
         activity.append(f"Planned {len(state['moodboard'].get('tiles', []))} moodboard image directions")
         return json.dumps(state["moodboard"])
 
-    coordinator = Agent(model=load_model(), tools=[read_inquiry_context, read_followup_history, draft_creative_brief, plan_moodboard], system_prompt="Call every tool in order. Never publish, message, or confirm a booking. Briefly confirm completion after all tools finish.")
+    coordinator = Agent(model=_coordinator_model(), tools=[read_inquiry_context, read_followup_history, draft_creative_brief, plan_moodboard], system_prompt="Call every tool in order. Never publish, message, or confirm a booking. Briefly confirm completion after all tools finish.")
     await coordinator.invoke_async("Coordinate the complete creative direction workflow.")
     if "brief" not in state or "moodboard" not in state:
         raise RuntimeError("creative direction did not complete every required tool")
@@ -238,6 +244,7 @@ async def invoke(payload, context):
         "decision": decision,
         "activity": activity,
         "agent_used_tools": len(activity) == 4,
+        "agent_execution": "agentcore",
     }
 
 

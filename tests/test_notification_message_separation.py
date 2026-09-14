@@ -11,7 +11,7 @@ from app import storage
 
 
 class NotificationMessageSeparationTests(unittest.TestCase):
-    def test_only_pending_human_work_is_marked_actionable(self):
+    def test_client_decisions_stay_out_of_notifications(self):
         with tempfile.TemporaryDirectory() as directory, patch.object(storage, "DB_PATH", Path(directory) / "shotcraft.db"):
             with sqlite3.connect(storage.DB_PATH) as db:
                 storage._ensure_schema(db)
@@ -26,12 +26,22 @@ class NotificationMessageSeparationTests(unittest.TestCase):
 
             client = storage.list_client_notifications("client@example.com")
             photographer = storage.list_photographer_notifications("photo@example.com")
-            followup = next(item for item in client if item["notification_type"] == "FOLLOWUP_REQUESTED")
             confirmed = next(item for item in client if item["notification_type"] == "SHOOT_CONFIRMED")
             photographer_confirmed = next(item for item in photographer if item["notification_type"] == "SHOOT_CONFIRMED")
-            self.assertTrue(followup["action_required"])
+            self.assertFalse(any(item["notification_type"] == "FOLLOWUP_REQUESTED" for item in client))
             self.assertFalse(confirmed["action_required"])
             self.assertFalse(photographer_confirmed["action_required"])
+
+    def test_old_client_decision_notifications_are_removed(self):
+        with tempfile.TemporaryDirectory() as directory, patch.object(storage, "DB_PATH", Path(directory) / "shotcraft.db"):
+            with sqlite3.connect(storage.DB_PATH) as db:
+                storage._ensure_schema(db)
+                db.execute("INSERT INTO inquiries(id, client_email, payload, status) VALUES(1, ?, '{}', 'NEEDS_INFORMATION')", ("client@example.com",))
+                db.execute("INSERT INTO client_notifications(client_email, inquiry_id, notification_type, event_key, title, body, target_view, action_required) "
+                           "VALUES('client@example.com', 1, 'FOLLOWUP_REQUESTED', 'old-client-decision', 'More details needed', 'Answer questions', 'followup', 1)")
+
+            notifications = storage.list_client_notifications("client@example.com")
+            self.assertFalse(any(item["event_key"] == "old-client-decision" for item in notifications))
 
     def test_saved_plan_notifications_use_new_copy_without_resetting_read_state(self):
         with tempfile.TemporaryDirectory() as directory, patch.object(storage, "DB_PATH", Path(directory) / "shotcraft.db"):
@@ -104,12 +114,26 @@ class NotificationMessageSeparationTests(unittest.TestCase):
             client = storage.list_client_notifications("client@example.com")
             photographer = storage.list_photographer_notifications("photo@example.com")
             self.assertFalse(any(item["notification_type"] == "NEW_MESSAGE" for item in client + photographer))
-            self.assertTrue(any(item["notification_type"] == "INQUIRY_READY" for item in photographer))
-            self.assertFalse(any(item["notification_type"] == "INQUIRY_READY" and item["inquiry_id"] == 2 for item in photographer))
+            self.assertFalse(any(item["notification_type"] == "INQUIRY_READY" for item in photographer))
             with sqlite3.connect(storage.DB_PATH) as db:
                 self.assertEqual(db.execute("SELECT COUNT(*) FROM inquiry_messages").fetchone()[0], 2)
                 self.assertEqual(db.execute("SELECT COUNT(*) FROM client_notifications WHERE notification_type='NEW_MESSAGE'").fetchone()[0], 0)
                 self.assertEqual(db.execute("SELECT COUNT(*) FROM photographer_notifications WHERE notification_type='NEW_MESSAGE'").fetchone()[0], 0)
+
+    def test_photographer_decisions_do_not_create_notifications_and_old_ones_resolve(self):
+        with tempfile.TemporaryDirectory() as directory, patch.object(storage, "DB_PATH", Path(directory) / "shotcraft.db"):
+            with sqlite3.connect(storage.DB_PATH) as db:
+                storage._ensure_schema(db)
+                db.execute("INSERT INTO inquiries(id, client_email, payload, status) VALUES(1, ?, ?, 'READY_FOR_REVIEW')",
+                           ("client@example.com", json.dumps({"client_name": "Client", "photographer_email": "photo@example.com"})))
+                db.execute("INSERT INTO photographer_notifications(photographer_email, inquiry_id, notification_type, event_key, title, body, target_view, action_required) "
+                           "VALUES('photo@example.com', 1, 'INQUIRY_READY', 'old-decision', 'Ready', 'Review', 'project', 1)")
+
+            notifications = storage.list_photographer_notifications("photo@example.com")
+            self.assertEqual(len(notifications), 1)
+            self.assertEqual(notifications[0]["event_key"], "old-decision")
+            self.assertIsNotNone(notifications[0]["resolved_at"])
+            self.assertFalse(any(item["event_key"] == "inquiry-ready:1" for item in notifications))
 
     def test_followup_completion_is_one_informational_photographer_update(self):
         with tempfile.TemporaryDirectory() as directory, patch.object(storage, "DB_PATH", Path(directory) / "shotcraft.db"):
