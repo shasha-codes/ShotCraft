@@ -136,9 +136,14 @@ app = FastAPI(title="ShotCraft API", version="0.1.0")
 
 @app.middleware("http")
 async def prevent_workspace_bundle_caching(request: Request, call_next):
-    """Always serve the evolving client workspace assets fresh in development."""
+    """Revalidate app-shell assets so deployments appear without stale browser UI."""
     response = await call_next(request)
-    if request.url.path in {"/static/client-workspace.js", "/static/client-workspace.css", "/static/client.html", "/static/us-cities.json", "/static/photographer-spa.js", "/static/photographer-spa.css", "/static/photographer.html"}:
+    if request.url.path in {
+        "/", "/auth", "/static/auth.html", "/static/auth.css",
+        "/static/client-workspace.js", "/static/client-workspace.css", "/static/client.html",
+        "/static/editorial-theme.css", "/static/landing.css", "/static/us-cities.json",
+        "/static/photographer-spa.js", "/static/photographer-spa.css", "/static/photographer.html",
+    }:
         response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
         response.headers["Pragma"] = "no-cache"
     return response
