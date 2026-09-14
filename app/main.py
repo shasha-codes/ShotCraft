@@ -844,8 +844,52 @@ def _format_schedule_datetime_for_display(value: str) -> str:
         return value.replace("T", " ")
 
 
+def process_schedule_change_request(inquiry_id: int, expected_source: str) -> None:
+    """Prepare safe replacement times after the client request is acknowledged."""
+    record = get_inquiry(inquiry_id)
+    active = get_change_request(inquiry_id)
+    if not record or not active or active.get("status") != "PENDING" or active.get("source_message") != expected_source:
+        return
+    try:
+        recommendation = _schedule_recommendation_result(inquiry_id, record)
+        # A client can submit a newer preference round while this work is running.
+        # Never let an older result replace that newer request.
+        active = get_change_request(inquiry_id)
+        if not active or active.get("status") != "PENDING" or active.get("source_message") != expected_source:
+            return
+        suggestions = recommendation["suggestions"]
+        review = {
+            "summary": recommendation["summary"],
+            "activity": recommendation["agent_activity"],
+            "agent_used_tools": recommendation["agent_used_tools"],
+            "agent_execution": recommendation.get("agent_execution", "unknown"),
+            "suggestion_count": len(suggestions),
+            "suggestions": suggestions,
+        }
+        save_schedule_suggestions(
+            inquiry_id,
+            json.loads(record.get("payload") or "{}").get("photographer_email") or "",
+            suggestions,
+            status="PENDING_PHOTOGRAPHER_REVIEW",
+        )
+        save_schedule_agent_review(inquiry_id, review)
+        update_planning_workflow(inquiry_id, "PHOTOGRAPHER_REVIEW", "WAITING_FOR_PHOTOGRAPHER", f"Reviewed the time change and prepared {len(suggestions)} conflict-free alternative{'s' if len(suggestions) != 1 else ''}")
+    except HTTPException as exc:
+        active = get_change_request(inquiry_id)
+        if not active or active.get("status") != "PENDING" or active.get("source_message") != expected_source:
+            return
+        save_schedule_agent_review(inquiry_id, {"summary": exc.detail, "activity": ["Checked requested duration, preferred windows, and confirmed bookings"], "agent_used_tools": False, "suggestion_count": 0})
+        update_planning_workflow(inquiry_id, "PHOTOGRAPHER_REVIEW", "WAITING_FOR_PHOTOGRAPHER", "No safe time on the requested date; ask the client for another date")
+    except Exception as exc:
+        print(f"[ShotCraft schedule change] Recommendation failed for inquiry {inquiry_id}: {exc}")
+        active = get_change_request(inquiry_id)
+        if active and active.get("status") == "PENDING" and active.get("source_message") == expected_source:
+            save_schedule_agent_review(inquiry_id, {"summary": "Automatic scheduling analysis was unavailable. Review the client's preferences and try again.", "activity": ["Saved the client's requested date and time windows"], "agent_used_tools": False, "suggestion_count": 0})
+            update_planning_workflow(inquiry_id, "PHOTOGRAPHER_REVIEW", "WAITING_FOR_PHOTOGRAPHER", "Automatic time analysis was unavailable; review the client request manually")
+
+
 @app.post("/api/inquiries/{inquiry_id}/schedule-change-request")
-def request_schedule_change(inquiry_id: int, change: ScheduleChangeRequest, request: Request) -> dict:
+def request_schedule_change(inquiry_id: int, change: ScheduleChangeRequest, request: Request, background_tasks: BackgroundTasks) -> dict:
     record = next((item for item in list_inquiries() if item["id"] == inquiry_id), None)
     if not record:
         raise HTTPException(status_code=404, detail="Inquiry not found.")
@@ -862,23 +906,9 @@ def request_schedule_change(inquiry_id: int, change: ScheduleChangeRequest, requ
     assessment = {"request_summary":"Client requested a new shoot date or preferred time window.","impacts":["The confirmed booking remains unchanged until the photographer proposes and the client selects a new time."],"proposed_updates":{},"decision":"REVIEW","decision_reason":"A confirmed date or time needs photographer approval.","missing_information":[],"confirmed_meeting_location":None,"schedule_change":requested}
     save_change_request(inquiry_id, source, assessment)
     update_planning_workflow(inquiry_id, "REVIEWING_TIME_CHANGE", "RUNNING", "Client sent new date and time preferences; the current booking remains confirmed")
-    try:
-        recommendation = _schedule_recommendation_result(inquiry_id, record)
-        suggestions = recommendation["suggestions"]
-        save_schedule_suggestions(
-            inquiry_id,
-            json.loads(record.get("payload") or "{}").get("photographer_email") or "",
-            suggestions,
-            status="PENDING_PHOTOGRAPHER_REVIEW",
-        )
-        save_schedule_agent_review(inquiry_id, {"summary": recommendation["summary"], "activity": recommendation["agent_activity"], "agent_used_tools": recommendation["agent_used_tools"], "agent_execution": recommendation.get("agent_execution", "unknown"), "suggestion_count": len(suggestions), "suggestions": suggestions})
-        update_planning_workflow(inquiry_id, "PHOTOGRAPHER_REVIEW", "WAITING_FOR_PHOTOGRAPHER", f"Reviewed the time change and prepared {len(suggestions)} conflict-free alternative{'s' if len(suggestions) != 1 else ''}")
-    except HTTPException as exc:
-        suggestions = []
-        save_schedule_agent_review(inquiry_id, {"summary": exc.detail, "activity": ["Checked requested duration, preferred windows, and confirmed bookings"], "agent_used_tools": False, "suggestion_count": 0})
-        update_planning_workflow(inquiry_id, "PHOTOGRAPHER_REVIEW", "WAITING_FOR_PHOTOGRAPHER", "No safe time on the requested date; ask the client for another date")
     add_inquiry_message(inquiry_id, "client", request.state.user["name"], source)
-    return {"inquiry_id": inquiry_id, "status": "PENDING", "schedule_change": requested, "suggestion_count": len(suggestions)}
+    background_tasks.add_task(process_schedule_change_request, inquiry_id, source)
+    return {"inquiry_id": inquiry_id, "status": "PENDING", "schedule_change": requested, "suggestion_count": 0, "processing": True}
 
 def run_cancellation_agent_review(inquiry_id: int) -> None:
     """Prepare a read-only Strands review after the client request has been saved."""

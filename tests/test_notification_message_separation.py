@@ -134,6 +134,37 @@ class NotificationMessageSeparationTests(unittest.TestCase):
             refreshed = storage.list_photographer_notifications("photo@example.com")
             self.assertEqual(len([item for item in refreshed if item["notification_type"] == "FOLLOWUP_COMPLETE"]), 1)
 
+    def test_time_change_submission_creates_one_informational_client_notification(self):
+        with tempfile.TemporaryDirectory() as directory, patch.object(storage, "DB_PATH", Path(directory) / "shotcraft.db"):
+            with sqlite3.connect(storage.DB_PATH) as db:
+                storage._ensure_schema(db)
+                db.execute(
+                    "INSERT INTO inquiries(id, client_email, payload, status, analysis) VALUES(1, ?, ?, 'SCHEDULED', ?)",
+                    (
+                        "client@example.com",
+                        json.dumps({"client_name": "Client", "photographer_email": "photo@example.com", "style_direction": "Seattle portraits"}),
+                        json.dumps({"concept_name": "Seattle portraits"}),
+                    ),
+                )
+            storage.save_change_request(
+                1,
+                "Schedule change request\nRequested date: Oct 12, 2026\nPreferred time windows: Afternoon",
+                {"schedule_change": {"shoot_date": "2026-10-12", "availability_windows": ["12:00–17:00"]}},
+            )
+
+            first = storage.list_client_notifications("client@example.com")
+            submitted = [item for item in first if item["notification_type"] == "TIME_CHANGE_REQUESTED"]
+            self.assertEqual(len(submitted), 1)
+            self.assertEqual(submitted[0]["title"], "Time change request sent")
+            self.assertEqual(submitted[0]["target_view"], "details")
+            self.assertFalse(submitted[0]["action_required"])
+            self.assertIsNone(submitted[0]["read_at"])
+            self.assertIn("current booking stays confirmed", submitted[0]["body"])
+
+            # Refreshing the notification feed does not duplicate the same request round.
+            refreshed = storage.list_client_notifications("client@example.com")
+            self.assertEqual(len([item for item in refreshed if item["notification_type"] == "TIME_CHANGE_REQUESTED"]), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

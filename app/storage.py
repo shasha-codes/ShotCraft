@@ -580,6 +580,24 @@ def list_client_notifications(client_email: str) -> list[dict]:
             schedule = db.execute("SELECT * FROM schedule_requests WHERE inquiry_id=?", (inquiry_id,)).fetchone()
             if schedule and schedule["status"] == "PENDING_CLIENT":
                 add(record, "SCHEDULE_OPTIONS", f"schedule:{inquiry_id}:{schedule['updated_at']}", "Choose your shoot time", f"New scheduling options are ready for {project}.", "plan", True, schedule["updated_at"])
+            change = db.execute("SELECT source_message, assessment, created_at FROM inquiry_change_requests WHERE inquiry_id=?", (inquiry_id,)).fetchone()
+            if change:
+                try:
+                    change_assessment = json.loads(change["assessment"] or "{}")
+                except (json.JSONDecodeError, TypeError):
+                    change_assessment = {}
+                if change_assessment.get("schedule_change"):
+                    signature = hashlib.sha256(f"{change['created_at']}:{change['source_message']}".encode()).hexdigest()[:12]
+                    add(
+                        record,
+                        "TIME_CHANGE_REQUESTED",
+                        f"time-change-requested:{inquiry_id}:{signature}",
+                        "Time change request sent",
+                        f"We sent your new date and time preferences for {project} to your photographer. Your current booking stays confirmed until you approve a replacement.",
+                        "details",
+                        False,
+                        change["created_at"],
+                    )
             if record["status"] == "SCHEDULED" and record["call_time"]:
                 add(record, "SHOOT_CONFIRMED", f"confirmed:{inquiry_id}:{record['call_time']}", "Shoot confirmed", f"{project} is scheduled. Review the final details.", "details", False, record["updated_at"])
             if record["status"] == "CANCELLED" and record["cancellation_status"] == "APPROVED":
