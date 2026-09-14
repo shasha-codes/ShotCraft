@@ -54,6 +54,7 @@ Example contents (use real values, never commit this file):
 
 ```dotenv
 AWS_REGION=us-west-2
+SHOTCRAFT_IMAGE_S3_BUCKET=shotcraft-generated-042269275839-us-west-2
 SHOTCRAFT_AGENTCORE_ENABLED=true
 SHOTCRAFT_AGENTCORE_RUNTIME_ARN=arn:aws:bedrock-agentcore:us-west-2:ACCOUNT_ID:runtime/RUNTIME_ID
 OPENAI_API_KEY=replace_with_your_openai_key
@@ -62,7 +63,9 @@ SHOTCRAFT_IMAGE_MODEL=gpt-image-2.5-flare
 
 The deployed AgentCore runtime reads its Mantle key from Secrets Manager. The
 EC2 app does not need that bearer key unless you intentionally enable local
-Strands fallback. Keep the production EC2 role limited to invoking AgentCore.
+Strands fallback. Give the production EC2 role only `s3:PutObject` and
+`s3:GetObject` on the image bucket's `generated/*` prefix, alongside its
+AgentCore invocation permission. Do not put personal AWS credentials on EC2.
 
 If you are demoing without external image generation, omit `OPENAI_API_KEY` and
 do not use the moodboard-image generation action.
@@ -96,8 +99,10 @@ Logs are available through `sudo journalctl -u shotcraft -f`.
 ## Data and image persistence
 
 - SQLite data: `/opt/shotcraft/app/data/shotcraft.db`
-- Temporary generated images: `/opt/shotcraft/app/static/generated/`
+- Durable generated images: private S3 bucket `shotcraft-generated-042269275839-us-west-2`, prefix `generated/`
+- Same-host fallback mirror: `/opt/shotcraft/app/static/generated/`
 
-For the hackathon, take an EBS snapshot before major changes. Before a more
-durable deployment, move generated images to a private S3 bucket and save each
-object key in SQLite. Do not store generated images in Git.
+For the hackathon, take an EBS snapshot before major changes. Generated images
+use stable app URLs backed by S3 with a local mirror; local fallback is not
+shared across instances and depends on the EBS volume. Do not store generated
+images in Git.

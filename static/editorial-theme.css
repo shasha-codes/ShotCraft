@@ -218,6 +218,11 @@ body:not(.photographer-app) .sidebar .sign-out:hover{color:#fff!important}
 .sidebar .sign-out{display:flex;align-items:center;justify-content:center;flex:none;width:calc(100% - 24px);min-height:44px;margin:14px 12px 4px!important;padding:10px 16px!important;border:1px solid #8069d5!important;border-radius:12px!important;background:#7057c7!important;color:#fff!important;font:700 13px/1.2 Inter,system-ui,sans-serif!important;cursor:pointer;box-shadow:0 10px 24px #7057c733;transition:background .16s,transform .16s}
 .sidebar .sign-out:hover{background:#8069d8!important;color:#fff!important;transform:translateY(-1px)}
 .sidebar .sign-out:focus-visible{outline:3px solid #b7a4ff;outline-offset:2px}
+/* Client account action stays quiet so New inquiry remains the primary CTA. */
+body:not(.photographer-app) .sidebar .sign-out{justify-content:center;width:calc(100% - 24px);min-height:38px;margin:8px 12px 2px!important;padding:8px 12px!important;border:0!important;border-radius:10px!important;background:transparent!important;color:#91899d!important;font:650 13px/1.2 Inter,system-ui,sans-serif!important;box-shadow:none!important;transition:color .16s,background .16s}
+body:not(.photographer-app) .sidebar .sign-out::before{content:none;display:none}
+body:not(.photographer-app) .sidebar .sign-out:hover{border-color:transparent!important;background:transparent!important;color:#f7f4fa!important;text-decoration:underline;text-underline-offset:4px;transform:none}
+body:not(.photographer-app) .sidebar .sign-out:focus-visible{outline:2px solid #9b82ff;outline-offset:2px}
 @media(max-width:820px){.photographer-app .sidebar{height:auto;overflow:visible}.sidebar .sign-out{width:auto;min-height:36px;margin:0 0 0 12px!important;padding:8px 12px!important}}
 
 /* Profile workspace */
