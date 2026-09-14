@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>Welcome · ShotCraft</title>
-  <link rel="stylesheet" href="/static/auth.css">
+  <link rel="stylesheet" href="/static/auth.css?v=city-picker-1">
 </head>
 <body>
   <main class="auth-shell">
@@ -24,7 +24,7 @@
         <div class="intro"><p class="eyebrow">Your creative workspace</p><h2 id="heading">Welcome back.</h2><p id="sub">Sign in to continue planning remarkable shoots.</p></div>
         <form id="form">
           <div class="field" id="nameField"><label for="name">Your name</label><input id="name" autocomplete="name" placeholder="How should we address you?"></div>
-          <div class="field profile-field" id="cityField"><label for="city">Your city</label><input id="city" autocomplete="address-level2" placeholder="e.g. Seattle, WA"></div>
+          <div class="field profile-field" id="cityField"><label for="city">Your city</label><div class="city-combobox"><input id="city" autocomplete="off" role="combobox" aria-autocomplete="list" aria-controls="citySuggestions" aria-expanded="false" placeholder="Search a U.S. city"><ul id="citySuggestions" role="listbox" hidden></ul></div><small class="city-help">Start typing, then choose a city from the suggestions.</small></div>
           <div class="field"><label for="email">Email address</label><input id="email" type="email" required autocomplete="email" placeholder="you@example.com"></div>
           <div class="field"><div class="label-row"><label for="password">Password</label><span id="passwordHint">At least 8 characters</span></div><input id="password" type="password" required minlength="8" autocomplete="current-password" placeholder="Enter your password"></div>
           <fieldset id="roleField"><legend>Choose your workspace</legend><div class="roles"><label class="role"><input type="radio" name="role" value="client" checked><span class="role-icon">◎</span><span><b>Plan a shoot</b><small>I’m a client sharing my vision</small></span><i>✓</i></label><label class="role"><input type="radio" name="role" value="photographer"><span class="role-icon">◇</span><span><b>Manage my studio</b><small>I’m a photographer producing shoots</small></span><i>✓</i></label></div></fieldset>
@@ -36,6 +36,6 @@
       </div>
     </section>
   </main>
-  <script src="/static/auth.js"></script>
+  <script src="/static/auth.js?v=city-picker-2"></script>
 </body>
 </html>

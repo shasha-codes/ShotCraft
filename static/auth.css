@@ -4,4 +4,11 @@
 
 /* Signup profiles make the photographer directory useful without adding a second screen. */
 .profile-field{display:none}.signup-mode .profile-field{display:flex}.photographer-profile{flex-direction:column}.field textarea{width:100%;min-height:92px;padding:14px 15px;border:1px solid var(--line);border-radius:12px;outline:none;resize:vertical;background:#fff;color:var(--ink);font:inherit}.field textarea:focus{border-color:var(--iris);box-shadow:0 0 0 4px #7057c714}.field label span{color:#9a949e;font-weight:500}
+
+.city-combobox{position:relative;width:100%}
+#citySuggestions{position:absolute;z-index:10;top:calc(100% + 5px);left:0;right:0;max-height:245px;overflow-y:auto;margin:0;padding:5px;list-style:none;border:1px solid var(--line);border-radius:12px;background:#fff;box-shadow:0 14px 30px #31233d1f}
+#citySuggestions[hidden]{display:none}
+#citySuggestions li{padding:10px 12px;border-radius:8px;cursor:pointer}
+#citySuggestions li:hover,#citySuggestions li[aria-selected="true"]{background:var(--iris-soft);color:var(--iris-dark)}
+.city-help{color:var(--muted);font-size:11px}
 #photographerProfile[hidden]{display:none}
