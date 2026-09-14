@@ -6,6 +6,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from fastapi import BackgroundTasks
+
 from app import main, storage
 from app.models import Inquiry, ScheduleChangeRequest
 
@@ -65,13 +67,27 @@ class ScheduleChangeRoundTests(unittest.TestCase):
         slot = {"starts_at": "2026-10-12T13:00", "ends_at": "2026-10-12T14:00", "location": "Seattle", "rationale": "Free after the required buffer"}
         review = {"suggestions": [slot], "summary": "A clear afternoon option fits the client's new window.", "agent_activity": ["Reviewed current booking and 0 prior preference rounds", "Checked 1 confirmed booking", "Ranked safe options for photographer review"], "agent_used_tools": True}
         user_request = SimpleNamespace(state=SimpleNamespace(user={"user_type": "client", "email": "client@example.com", "name": "Client"}))
-        with patch.object(main, "_schedule_recommendation_result", return_value=review), patch.object(main, "add_inquiry_message"):
-            result = main.request_schedule_change(self.inquiry_id, ScheduleChangeRequest(shoot_date="2026-10-12", availability_windows=["12:00–17:00"]), user_request)
-        self.assertEqual(result["suggestion_count"], 1)
+        background_tasks = BackgroundTasks()
+        with patch.object(main, "_schedule_recommendation_result", return_value=review) as recommend, patch.object(main, "add_inquiry_message"):
+            result = main.request_schedule_change(self.inquiry_id, ScheduleChangeRequest(shoot_date="2026-10-12", availability_windows=["12:00–17:00"]), user_request, background_tasks)
+            recommend.assert_not_called()
+            self.assertEqual(len(background_tasks.tasks), 1)
+            source = storage.get_change_request(self.inquiry_id)["source_message"]
+            main.process_schedule_change_request(self.inquiry_id, source)
+        self.assertTrue(result["processing"])
+        self.assertEqual(result["suggestion_count"], 0)
         self.assertEqual(storage.get_inquiry(self.inquiry_id)["call_time"], "2026-10-10T10:00")
         self.assertEqual(storage.get_schedule_request(self.inquiry_id)["status"], "PENDING_PHOTOGRAPHER_REVIEW")
         self.assertEqual(storage.get_change_request(self.inquiry_id)["assessment"]["agent_review"]["summary"], review["summary"])
         self.assertEqual(storage.get_planning_workflow(self.inquiry_id)["status"], "WAITING_FOR_PHOTOGRAPHER")
+
+    def test_stale_background_result_does_not_replace_newer_preferences(self):
+        storage.save_change_request(self.inquiry_id, "Older request", {"schedule_change": {"shoot_date": "2026-10-11", "availability_windows": ["09:00–12:00"]}})
+        storage.save_change_request(self.inquiry_id, "Newer request", {"schedule_change": {"shoot_date": "2026-10-12", "availability_windows": ["12:00–17:00"]}})
+        with patch.object(main, "_schedule_recommendation_result") as recommend:
+            main.process_schedule_change_request(self.inquiry_id, "Older request")
+        recommend.assert_not_called()
+        self.assertEqual(storage.get_change_request(self.inquiry_id)["source_message"], "Newer request")
 
 
 if __name__ == "__main__":
